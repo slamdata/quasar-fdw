@@ -19,11 +19,13 @@ LDFLAGS = -lcurl
 all:
 
 test: unit-test
+	./unit-test
 
 unit-test: unit-test.c ../../src/quasar_api.c
 	$(CC) $(CFLAGS) $(LDFLAGS) unit-test.c ../../src/quasar_api.c -o $@
 	chmod +x $@
-	./$@
 
 clean:
 	rm -f unit-test
+
+.PHONY: test clean
