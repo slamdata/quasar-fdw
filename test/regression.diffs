@@ -1,0 +1,25 @@
+*** /Users/jon/dev/slamdata/quasar_fdw/test/expected/quasar.out	2015-11-02 14:43:26.000000000 -0700
+--- /Users/jon/dev/slamdata/quasar_fdw/test/results/quasar.out	2015-11-02 14:43:28.000000000 -0700
+***************
+*** 18,26 ****
+         SERVER quasar
+         OPTIONS (table 'zips');
+  /* Select */
+!   city
+! ---------
+! BARRE
+! AGAWAM
+! BLANDFORD
+! (3 rows)
+--- 18,25 ----
+         SERVER quasar
+         OPTIONS (table 'zips');
+  /* Select */
+! SELECT city FROM zips LIMIT 3;
+!  city 
+! ------
+! (0 rows)
+! 
+
+======================================================================
+

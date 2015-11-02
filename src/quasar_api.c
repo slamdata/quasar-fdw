@@ -111,21 +111,13 @@ void curl_csv_fini(struct curl_csv *s, QuasarApiResponse *r) {
  *  @string url (caller is responsible for free())
  */
 char *quasar_api_url(CURL *curl, char *server, char *path, char *query) {
+    StringInfoData buf;
+    initStringInfo(&buf);
     char *query_escaped = curl_easy_escape(curl, query, 0);
-    int server_len = strlen(server);
-    int path_len = strlen(path);
-    int query_len = strlen(query_escaped);
-    int url_len = server_len + 9 + path_len + 3 + query_len + 1;
-    char *url = malloc(sizeof(char) * url_len);
-
-    strcpy(url, server);
-    strcpy(url + server_len, "/query/fs");
-    strcpy(url + server_len + 9, path);
-    strcpy(url + server_len + 9 + path_len, "?q=");
-    strcpy(url + url_len - query_len - 1, query_escaped);
+    appendStringInfo(&buf, "%s/query/fs/%s?q=%s", server, path, query_escaped);
 
     curl_free(query_escaped);
-    return url;
+    return buf.data;
 }
 
 
@@ -195,7 +187,7 @@ int quasar_api_get(char *server, char *path, char *query, QuasarApiResponse *res
 
         // cleanup
         curl_easy_cleanup(curl);
-        free(url);
+        pfree(url);
         curl_slist_free_all(headers);
     }
     return retval;

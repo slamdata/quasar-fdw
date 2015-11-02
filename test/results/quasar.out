@@ -18,9 +18,8 @@ CREATE FOREIGN TABLE zips(city varchar, loc float[2], pop integer, state char(2)
        SERVER quasar
        OPTIONS (table 'zips');
 /* Select */
-  city
----------
-BARRE
-AGAWAM
-BLANDFORD
-(3 rows)
+SELECT city FROM zips LIMIT 3;
+ city 
+------
+(0 rows)
+

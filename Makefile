@@ -26,7 +26,6 @@ QUASAR_VERSION = $(shell cat $(QUASAR_DIR)/version.sbt | cut -d'=' -f2 | xargs)
 
 CURL_LIB = $(shell curl-config --libs)
 MY_LIBS = $(CURL_LIB) -lcsv
-TEST_LIBS = -lcheck
 SHLIB_LINK = $(MY_LIBS)
 
 ## PGXS Configuration
@@ -39,7 +38,7 @@ DOCS         = $(wildcard doc/*.md)
 USE_MODULE_DB = 1
 TESTS        = $(wildcard test/sql/*.sql)
 REGRESS      = $(patsubst test/sql/%.sql,%,$(TESTS))
-0REGRESS_OPTS = --inputdir=test --outputdir=test \
+REGRESS_OPTS = --inputdir=test --outputdir=test \
 	--load-language=plpgsql --load-extension=$(EXTENSION)
 MODULE_big      = $(EXTENSION)
 OBJS         =  $(patsubst %.c,%.o,$(wildcard src/*.c))
@@ -61,20 +60,6 @@ include $(PGXS)
 override pg_regress_clean_files = test/results/ test/regression.diffs test/regression.out tmp_check/ log/
 
 
-## Unit Tests
-
-unit-test: test/unit/*.c src/*.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(PG_LIBS) $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) $(MY_LIBS) $(TEST_LIBS) $^ -o $@ -execute -L/usr/local/Cellar/postgresql/9.4.5/lib/
-	chmod +x $@
-
-test: unit-test
-	./unit-test
-
-clean:	clean-unit-test
-
-clean-unit-test:
-	rm ./unit-test
-
 ## Integration Tests
 
 import-test-data:
@@ -85,7 +70,3 @@ build-quasar:
 
 start-quasar:
 	java -jar $(QUASAR_DIR)/web/target/scala-$(SCALA_VERSION)/web_$(SCALA_VERSION)-$(QUASAR_VERSION)-one-jar.jar -c test/quasar-config.json
-
-## Misc
-
-.PHONY: test

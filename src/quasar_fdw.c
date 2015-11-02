@@ -17,8 +17,12 @@
 #include "postgres.h"
 
 #include "access/reloptions.h"
+#include "catalog/pg_foreign_server.h"
+#include "catalog/pg_foreign_table.h"
+#include "commands/defrem.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
+#include "lib/stringinfo.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
@@ -80,6 +84,16 @@ struct quasarFdwOption
     Oid        optcontext;       /* Oid of catalog in which option may appear */
 };
 
+static struct quasarFdwOption valid_options[] =
+    {
+        /* Available options for CREATE SERVER */
+        { "server",  ForeignServerRelationId },
+        { "path",    ForeignServerRelationId },
+        /* Available options for CREATE TABLE */
+        { "table",   ForeignTableRelationId },
+        { NULL,     InvalidOid }
+    };
+
 /*
  * This is what will be set and stashed away in fdw_private and fetched
  * for subsequent routines.
@@ -123,24 +137,91 @@ quasar_fdw_handler(PG_FUNCTION_ARGS)
       PG_RETURN_POINTER(fdwroutine);
 }
 
+static bool
+quasarIsValidOption(const char *option, Oid context)
+{
+    struct quasarFdwOption *opt;
+
+    for (opt = valid_options; opt->optname; opt++)
+    {
+        if (context == opt->optcontext && strcmp(opt->optname, option) == 0)
+            return true;
+    }
+    return false;
+}
+
 Datum
 quasar_fdw_validator(PG_FUNCTION_ARGS)
 {
-      List     *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+    List     *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+    Oid       catalog = PG_GETARG_OID(1);
+    ListCell  *cell;
+    char      *quasar_server = NULL;
+    char      *quasar_path = NULL;
+    char      *quasar_table = NULL;
 
-      elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG1, "entering function %s", __func__);
 
-      /* make sure the options are valid */
+    /* make sure the options are valid */
 
-      /* no options are supported */
+    foreach(cell, options_list) {
+        DefElem    *def = (DefElem *) lfirst(cell);
 
-      if (list_length(options_list) > 0)
+        if (!quasarIsValidOption(def->defname, catalog)) {
+            struct quasarFdwOption *opt;
+            StringInfoData buf;
+
+            /*
+             * Unknown option specified, complain about it. Provide a hint
+             * with list of valid options for the object.
+             */
+            initStringInfo(&buf);
+            for (opt = valid_options; opt->optname; opt++)
+            {
+                if (catalog == opt->optcontext)
+                    appendStringInfo(&buf, "%s%s", (buf.len > 0) ? ", " : "",
+                                     opt->optname);
+            }
+
             ereport(ERROR,
                     (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-                     errmsg("invalid options"),
-                     errhint("Quasar FDW does not support any options")));
+                     errmsg("invalid option \"%s\"", def->defname),
+                     errhint("Valid options in this context are: %s", buf.len ? buf.data : "<none>")
+                     ));
+        }
 
-      PG_RETURN_VOID();
+        /*
+         * Here is the code for the valid options
+         */
+
+        if (strcmp(def->defname, "server") == 0) {
+            if (quasar_server)
+                ereport(ERROR,
+                        (errcode(ERRCODE_SYNTAX_ERROR),
+                         errmsg("redundant options: server (%s)", defGetString(def))
+                         ));
+
+            quasar_server = defGetString(def);
+        } else if (strcmp(def->defname, "path") == 0) {
+            if (quasar_path)
+                ereport(ERROR,
+                        (errcode(ERRCODE_SYNTAX_ERROR),
+                         errmsg("redundant options: path (%s)", defGetString(def))
+                         ));
+
+            quasar_path = defGetString(def);
+        } else if (strcmp(def->defname, "table") == 0) {
+            if (quasar_table)
+                ereport(ERROR,
+                        (errcode(ERRCODE_SYNTAX_ERROR),
+                         errmsg("redundant options: table (%s)", defGetString(def))
+                         ));
+
+            quasar_table = defGetString(def);
+        }
+    }
+
+    PG_RETURN_VOID();
 }
 
 #if (PG_VERSION_NUM >= 90200)
