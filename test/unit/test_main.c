@@ -17,11 +17,12 @@
 #include <check.h>
 #include "tests.h"
 
+Suite *QuasarSuite(void);
+
 Suite * QuasarSuite(void)
 {
     Suite *s;
     s = suite_create("Quasar");
-    suite_add_tcase(s, ArrayTCase());
     suite_add_tcase(s, QuasarApiTCase());
     return s;
 }

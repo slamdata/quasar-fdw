@@ -19,14 +19,15 @@
 #include <stdio.h>
 #include <curl/curl.h>
 #include <csv.h>
-void free(void *ptr);
-void println(char *ptr);
 
-#include "array.h"
+#include "postgres.h"
+#include "nodes/pg_list.h"
+#include "lib/stringinfo.h"
 #include "quasar_api.h"
 
+
 struct csv_udata {
-    Array2D *a;
+    List *a;
     int linefeed;
 };
 
@@ -39,17 +40,28 @@ struct curl_csv {
     struct csv_udata data;
 };
 
+/* Internal functions for this file */
+char * quasar_api_url(CURL *curl, char *server, char *path, char *query);
+static void csv_cb1(void *s, size_t len, void *data);
+static void csv_cb2(int c, void *data);
+void curl_csv_prepare(struct curl_csv *s);
+void curl_csv_abort_cleanup(struct curl_csv *s);
+static size_t curl_csv_callback(void *contents, size_t size, size_t nmemb, void *userp);
+void curl_csv_fini(struct curl_csv *s, QuasarApiResponse *r);
+
+
+
 static void csv_cb1(void *s, size_t len, void *data) {
     struct csv_udata *u = (struct csv_udata*) data;
     if (u->linefeed) {
-        array2d_linefeed(u->a);
+        lappend(u->a, NIL);
         u->linefeed = 0;
     }
 
-    char *field = malloc(len) + 1;
+    char *field = palloc(len + 1);
     memcpy(field, s, len);
     memset(field + len, '\0', 1);
-    array2d_insert(u->a, &field);
+    lappend(llast(u->a), field);
 }
 
 static void csv_cb2(int c, void *data) {
@@ -58,9 +70,18 @@ static void csv_cb2(int c, void *data) {
 
 void curl_csv_prepare(struct curl_csv *s) {
     csv_init(&s->p, 0);
-    s->data.a = malloc(sizeof(Array2D));
-    array2d_init(s->data.a, sizeof(char*), 1, 2);
-    s->data.linefeed = 0;
+    s->data.a = NIL;
+    s->data.linefeed = 1;
+}
+
+void curl_csv_abort_cleanup(struct curl_csv *s) {
+    ListCell *lc;
+
+    csv_free(&s->p);
+    foreach(lc, s->data.a) {
+        list_free_deep(lfirst(lc));
+    }
+    list_free(s->data.a);
 }
 
 /**
@@ -73,8 +94,10 @@ static size_t curl_csv_callback(
     return csv_parse(&s->p, contents, size * nmemb, csv_cb1, csv_cb2, &s->data);
 }
 
-void curl_csv_fini(struct curl_csv *s) {
+void curl_csv_fini(struct curl_csv *s, QuasarApiResponse *r) {
     csv_fini(&s->p, csv_cb1, csv_cb2, &s->data);
+    r->columnNames = lfirst(list_head(s->data.a));
+    r->data = list_delete_first(s->data.a);
 }
 
 /**
@@ -122,8 +145,13 @@ void quasar_api_cleanup() {
  *  @QuasarApiResponse * response
  */
 void quasar_api_response_free(QuasarApiResponse *r) {
-    array_free(r->columnNames);
-    array2d_free(r->data);
+    ListCell *lc;
+    list_free_deep(r->columnNames);
+    foreach(lc, r->data) {
+        list_free_deep(lfirst(lc));
+    }
+    list_free(r->data);
+    r->columnNames = r->data = NULL;
 }
 
 
@@ -158,14 +186,10 @@ int quasar_api_get(char *server, char *path, char *query, QuasarApiResponse *res
         if(res != CURLE_OK) {
             fprintf(stderr, "curl_easy_perform() failed: %s\n",
                     curl_easy_strerror(res));
+            curl_csv_abort_cleanup(&udata);
 
         } else {
-            curl_csv_fini(&udata);
-
-            // inside udata.data is an Array2D with the full csv in it
-            response->columnNames = array2d_pop_row(udata.data.a);
-            response->data = udata.data.a;
-
+            curl_csv_fini(&udata, response);
             retval = QUASAR_API_SUCCESS;
         }
 

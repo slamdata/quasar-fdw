@@ -24,11 +24,10 @@ QUASAR_VERSION = $(shell cat $(QUASAR_DIR)/version.sbt | cut -d'=' -f2 | xargs)
 
 ## Quasar FDW Configuration
 
-
 CURL_LIB = $(shell curl-config --libs)
-
-PG_CPPFLAGS =
-PG_LIBS = $(CURL_LIB)
+MY_LIBS = $(CURL_LIB) -lcsv
+TEST_LIBS = -lcheck
+SHLIB_LINK = $(MY_LIBS)
 
 ## PGXS Configuration
 
@@ -64,8 +63,17 @@ override pg_regress_clean_files = test/results/ test/regression.diffs test/regre
 
 ## Unit Tests
 
-unit-test:
-	$(CC) -c $(CFLAGS) $< -o $@
+unit-test: test/unit/*.c src/*.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(PG_LIBS) $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) $(MY_LIBS) $(TEST_LIBS) $^ -o $@ -execute -L/usr/local/Cellar/postgresql/9.4.5/lib/
+	chmod +x $@
+
+test: unit-test
+	./unit-test
+
+clean:	clean-unit-test
+
+clean-unit-test:
+	rm ./unit-test
 
 ## Integration Tests
 
@@ -79,3 +87,5 @@ start-quasar:
 	java -jar $(QUASAR_DIR)/web/target/scala-$(SCALA_VERSION)/web_$(SCALA_VERSION)-$(QUASAR_VERSION)-one-jar.jar -c test/quasar-config.json
 
 ## Misc
+
+.PHONY: test
