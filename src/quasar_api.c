@@ -18,39 +18,67 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <curl/curl.h>
+#include <csv.h>
 void free(void *ptr);
 void println(char *ptr);
 
+#include "array.h"
 #include "quasar_api.h"
 
-struct MemoryStruct {
-    char *memory;
-    size_t size;
+struct csv_udata {
+    Array2D *a;
+    int linefeed;
 };
 
+/**
+ * Wrap up a csv parser and quasar api response
+ * Used as user space data for curl callbacks
+ */
+struct curl_csv {
+    struct csv_parser p;
+    struct csv_udata data;
+};
 
-static size_t
-WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
-{
-    size_t realsize = size * nmemb;
-    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
-
-    mem->memory = realloc(mem->memory, mem->size + realsize + 1);
-    if(mem->memory == NULL) {
-        /* out of memory! */
-        printf("not enough memory (realloc returned NULL)\n");
-        return 0;
+static void csv_cb1(void *s, size_t len, void *data) {
+    struct csv_udata *u = (struct csv_udata*) data;
+    if (u->linefeed) {
+        array2d_linefeed(u->a);
+        u->linefeed = 0;
     }
 
-    memcpy(&(mem->memory[mem->size]), contents, realsize);
-    mem->size += realsize;
-    mem->memory[mem->size] = 0;
+    char *field = malloc(len) + 1;
+    memcpy(field, s, len);
+    memset(field + len, '\0', 1);
+    array2d_insert(u->a, &field);
+}
 
-    return realsize;
+static void csv_cb2(int c, void *data) {
+    ((struct csv_udata *) data)->linefeed = 1;
+}
+
+void curl_csv_prepare(struct curl_csv *s) {
+    csv_init(&s->p, 0);
+    s->data.a = malloc(sizeof(Array2D));
+    array2d_init(s->data.a, sizeof(char*), 1, 2);
+    s->data.linefeed = 0;
 }
 
 /**
- * api_url
+ * curl response callback to parse csv into quasar_api_response
+ */
+static size_t curl_csv_callback(
+    void *contents, size_t size, size_t nmemb, void *userp)
+{
+    struct curl_csv *s = (struct curl_csv*) userp;
+    return csv_parse(&s->p, contents, size * nmemb, csv_cb1, csv_cb2, &s->data);
+}
+
+void curl_csv_fini(struct curl_csv *s) {
+    csv_fini(&s->p, csv_cb1, csv_cb2, &s->data);
+}
+
+/**
+ * quasar_api_url
  * Concatentate a full url from server, path and quasar query
  * Arguments:
  *  @string server
@@ -59,7 +87,7 @@ WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
  * Returns:
  *  @string url (caller is responsible for free())
  */
-char *api_url(CURL *curl, char *server, char *path, char *query) {
+char *quasar_api_url(CURL *curl, char *server, char *path, char *query) {
     char *query_escaped = curl_easy_escape(curl, query, 0);
     int server_len = strlen(server);
     int path_len = strlen(path);
@@ -79,21 +107,33 @@ char *api_url(CURL *curl, char *server, char *path, char *query) {
 
 
 
-void api_init() {
+void quasar_api_init() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 
-void api_cleanup() {
+void quasar_api_cleanup() {
     curl_global_cleanup();
 }
 
-int api_get(char *server, char *path, char *query, struct api_response *response) {
-    int retval = API_FAILED;
+/**
+ * quasar_api_response_free
+ * Free the memory of an quasar_api_response object
+ * Arguments:
+ *  @QuasarApiResponse * response
+ */
+void quasar_api_response_free(QuasarApiResponse *r) {
+    array_free(r->columnNames);
+    array2d_free(r->data);
+}
+
+
+int quasar_api_get(char *server, char *path, char *query, QuasarApiResponse *response) {
+    int retval = QUASAR_API_FAILED;
     CURL *curl = curl_easy_init();
 
     if (curl) {
         // Set URL
-        char *url = api_url(curl, server, path, query);
+        char *url = quasar_api_url(curl, server, path, query);
         curl_easy_setopt(curl, CURLOPT_URL, url);
 
         // Encode with gzip (libcurl decompresses for us)
@@ -101,15 +141,15 @@ int api_get(char *server, char *path, char *query, struct api_response *response
 
         // json response
         struct curl_slist *headers=NULL;
-        curl_slist_append(headers, "Accept: application/json");
+        headers = curl_slist_append(headers, "Accept: text/csv");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-        // Download data to memory
-        struct MemoryStruct chunk;
-        chunk.memory = malloc(1);  /* will be grown as needed by the realloc above */
-        chunk.size = 0;    /* no data at this point */
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+        // Create user data structure to store csv
+        struct curl_csv udata;
+        curl_csv_prepare(&udata);
+
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_csv_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&udata);
 
         // execute
         CURLcode res = curl_easy_perform(curl);
@@ -120,21 +160,19 @@ int api_get(char *server, char *path, char *query, struct api_response *response
                     curl_easy_strerror(res));
 
         } else {
-            // chunk.memory points to a memory block with the full response in it
-            // chunk.size is the size of the memory block
+            curl_csv_fini(&udata);
 
-            // Parse json into api_response
+            // inside udata.data is an Array2D with the full csv in it
+            response->columnNames = array2d_pop_row(udata.data.a);
+            response->data = udata.data.a;
 
-            printf("I should be parsing json but instead im printing FIXME\n");
-            fwrite(chunk.memory, chunk.size, 1, stdout);
-            retval = API_SUCCESS;
+            retval = QUASAR_API_SUCCESS;
         }
 
         // cleanup
         curl_easy_cleanup(curl);
         free(url);
         curl_slist_free_all(headers);
-        free(chunk.memory);
     }
     return retval;
 }

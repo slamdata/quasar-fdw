@@ -13,16 +13,16 @@
 #
 ##############################################################################
 
-CFLAGS = -Wall -Werror
-LDFLAGS = -lcurl
+CFLAGS = -Wall -Werror -g
+LDFLAGS = -lcurl -lcheck -lcsv
 
 all:
 
 test: unit-test
 	./unit-test
 
-unit-test: unit-test.c ../../src/quasar_api.c
-	$(CC) $(CFLAGS) $(LDFLAGS) unit-test.c ../../src/quasar_api.c -o $@
+unit-test: *.c ../../src/array.c ../../src/quasar_api.c
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
 	chmod +x $@
 
 clean:
