@@ -11,6 +11,7 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
     - Implication: Instead of relying on the Copy protocol to read the CSV back from Quasar, I'll have to write my own parsing system and translate that to Tuples.
     - Plan: Keep the forked curl piping to a FIFO file. Instead of passing to the Copy protocol to read, I'll read it as json into `libjson`. Once I've read a record, I parse that into a Tuple, similar to oracle_fdw.
     - Benefits: This system can handle not requesting dropped columns, as well as the array types I'm pretty sure don't work with Copy/csv already.
+- I added the column name mapping feature. See the example below. Don't support arrays yet so we'll have to wait to truly test it.
 - Next Steps:
     - Support `WHERE` clauses.
     - Rewrite api response parsing (see above)
@@ -38,6 +39,12 @@ CREATE SERVER quasar
 CREATE FOREIGN TABLE zips(city varchar, loc float[2], pop integer, state char(2))
     SERVER quasar
     OPTIONS (table 'zips');
+
+CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
+                            b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
+                            c varchar OPTIONS (map 'topObj.midObj.botObj.c'))
+       SERVER quasar
+       OPTIONS (table 'nested');
 
 SELECT city FROM zips LIMIT 3;
 ```
