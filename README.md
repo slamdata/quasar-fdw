@@ -37,7 +37,7 @@ Setup:
 
 1. Start mongodb
 2. Import test data (`QUASAR_DIR=../quasar make import-test-data`)
-3. Start Quasar (`QUASAR_DIR=../quasar make start-quasar`)
+3. Start Quasar (`QUASAR_DIR=../quasar make build-quasar start-quasar`)
 4. Start Postgres
 
 And to test:

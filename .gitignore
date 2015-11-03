@@ -4,3 +4,5 @@ sql/*--*sql
 test/regression.*
 test/results/*
 *.so
+regression.*
+results/*
