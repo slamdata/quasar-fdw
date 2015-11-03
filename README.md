@@ -26,8 +26,6 @@ CREATE FOREIGN TABLE zips(city varchar, loc float[2], pop integer, state char(2)
     SERVER quasar
     OPTIONS (table 'zips');
 
-CREATE USER MAPPING FOR current_user SERVER quasar;
-
 SELECT city FROM zips LIMIT 3;
 ```
 

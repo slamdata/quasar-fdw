@@ -67,7 +67,6 @@ extern bool quasar_is_valid_option(const char *option, Oid context);
 extern QuasarOpt *quasar_get_options(Oid foreigntableid);
 
 /* quasar_connutil.c headers */
-extern char *quasar_signature(char *query, char *server, char *path);
-extern char *create_tempprefix(char *sig);
+extern char *create_tempprefix(void);
 
 #endif /* QUASAR_FDW_QUASAR_FDW_H */

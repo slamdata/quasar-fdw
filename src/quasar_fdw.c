@@ -88,6 +88,11 @@ static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf)
 static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 
 /*
+ * Private functions
+ */
+char *quasar_build_query(QuasarOpt *opt, ForeignScanState *node);
+
+/*
  * This is what will be set and stashed away in fdw_private and fetched
  * for subsequent routines.
  */
@@ -158,7 +163,7 @@ quasarGetForeignRelSize(PlannerInfo *root,
 
       elog(DEBUG1, "entering function %s", __func__);
 
-      //baserel->rows = 0;
+      baserel->rows = 0;
 
       fdw_private = palloc0(sizeof(QuasarFdwPlanState));
       baserel->fdw_private = (void *) fdw_private;
@@ -295,9 +300,11 @@ quasarBeginForeignScan(ForeignScanState *node,
       QuasarFdwExecState *festate;
       QuasarOpt *opt;
       StringInfoData buf;
-      char       *url, *query, *signature, *prefix;
+      char       *url, *query, *prefix;
       pid_t       pid;
       quasar_ipc_context ctx;
+
+      ctx.found_header_row = false;
 
       /*
        * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
@@ -312,26 +319,21 @@ quasarBeginForeignScan(ForeignScanState *node,
       initStringInfo(&buf);
       appendStringInfo(&buf, "%s/query/fs%s?q=",
                        opt->server, opt->path);
-      url = pstrdup(buf.data);
+      url = buf.data;
 
       //TODO FILL IN QUERY
-      resetStringInfo(&buf);
-      appendStringInfo(&buf, "SELECT city FROM %s LIMIT 3", opt->table);
-      query = pstrdup(buf.data);
-      pfree(buf.data);
+      query = quasar_build_query(opt, node);
 
-      signature = quasar_signature(query, opt->server, opt->path);
-      prefix = create_tempprefix(signature);
-
+      prefix = create_tempprefix();
       snprintf(ctx.flagfn, sizeof(ctx.flagfn), "%s.flag", prefix);
       snprintf(ctx.datafn, sizeof(ctx.datafn), "%s.data", prefix);
-      //  unlink(ctx.flagfn);
-      //  unlink(ctx.datafn);
+      pfree(prefix);
+
       if (mkfifo(ctx.flagfn, S_IRUSR | S_IWUSR) != 0)
           elog(ERROR, "mkfifo failed(%d):%s", errno, ctx.flagfn);
       if (mkfifo(ctx.datafn, S_IRUSR | S_IWUSR) != 0)
           elog(ERROR, "mkfifo failed(%d):%s", errno, ctx.datafn);
-      ctx.found_header_row = false;
+
 
 
       /*
@@ -607,4 +609,12 @@ body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
     }
 
     return segsize;
+}
+
+
+char *quasar_build_query(QuasarOpt *opt, ForeignScanState *node) {
+    StringInfoData buf;
+    initStringInfo(&buf);
+    appendStringInfo(&buf, "SELECT city FROM %s LIMIT 3", opt->table);
+    return buf.data;
 }

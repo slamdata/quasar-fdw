@@ -150,7 +150,7 @@ quasar_is_valid_option(const char *option, Oid context)
 QuasarOpt* quasar_get_options(Oid foreignoid) {
     ForeignTable *f_table = NULL;
     ForeignServer *f_server = NULL;
-    UserMapping *f_mapping;
+    /* UserMapping *f_mapping; */
     List *options;
     ListCell *lc;
     QuasarOpt *opt;
@@ -173,13 +173,13 @@ QuasarOpt* quasar_get_options(Oid foreignoid) {
     }
     PG_END_TRY();
 
-    f_mapping = GetUserMapping(GetUserId(), f_server->serverid);
+    /* f_mapping = GetUserMapping(GetUserId(), f_server->serverid); */
 
     options = NIL;
     if (f_table)
         options = list_concat(options, f_table->options);
     options = list_concat(options, f_server->options);
-    options = list_concat(options, f_mapping->options);
+    /* options = list_concat(options, f_mapping->options); */
 
     /* Defaults */
     opt->server = DEFAULT_SERVER;
