@@ -31,6 +31,9 @@
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "nodes/pg_list.h"
+#include "nodes/makefuncs.h"
+#include "nodes/value.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
@@ -49,6 +52,11 @@ PG_MODULE_MAGIC;
 extern Datum quasar_fdw_handler(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(quasar_fdw_handler);
+
+/*
+ * on-load initializer
+ */
+extern PGDLLEXPORT void _PG_init(void);
 
 
 /* callback functions */
@@ -102,6 +110,22 @@ typedef struct
       int       bar;
 } QuasarFdwPlanState;
 
+
+/*
+ * _PG_init
+ *      Library load-time initalization.
+ *      Sets exitHook() callback for backend shutdown.
+ *      Also finds the OIDs of PostGIS the PostGIS geometry type.
+ */
+void
+_PG_init(void)
+{
+#ifdef _WIN32
+    curl_global_init(CURL_GLOBAL_WIN32);
+#else
+    curl_global_init(CURL_GLOBAL_NOTHING);
+#endif
+}
 
 Datum
 quasar_fdw_handler(PG_FUNCTION_ARGS)
@@ -304,7 +328,6 @@ quasarBeginForeignScan(ForeignScanState *node,
       pid_t       pid;
       quasar_ipc_context ctx;
 
-      ctx.found_header_row = false;
 
       /*
        * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
@@ -313,6 +336,13 @@ quasarBeginForeignScan(ForeignScanState *node,
           return;
 
       festate = (QuasarFdwExecState *) palloc(sizeof(QuasarFdwExecState));
+
+      festate->copy_options =
+          list_make2(
+              makeDefElem("format", (Node*) makeString("csv")),
+              makeDefElem("header", (Node*) makeInteger(1))
+          );
+
       /* Fetch options of foreign table */
       opt = quasar_get_options(RelationGetRelid(node->ss.ss_currentRelation));
 
@@ -395,10 +425,7 @@ quasarBeginForeignScan(ForeignScanState *node,
           }
           curl_slist_free_all(headers);
           curl_easy_cleanup(curl);
-          pfree(urlbuf.data);
           curl_free(query_encoded);
-          pfree(query);
-          pfree(url);
 
           proc_exit(0);
       }
@@ -436,8 +463,6 @@ quasarBeginForeignScan(ForeignScanState *node,
       festate->datafn = pstrdup(ctx.datafn);
 
       node->fdw_state = (void *) festate;
-
-      pfree(opt);
 }
 
 
@@ -587,26 +612,11 @@ static size_t
 body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 {
     elog(DEBUG1, "entering function %s", __func__);
-    char * post_header_row;
-    size_t offset;
     size_t      segsize = size * nmemb;
     quasar_ipc_context *ctx = (quasar_ipc_context *) userp;
 
-    if (!ctx->found_header_row) {
-        post_header_row = strchr((char*) buffer, '\n');
-        if (post_header_row) {
-            offset = post_header_row - ((char*) buffer) + 1;
-            fwrite(post_header_row + 1, 1, segsize - offset, ctx->datafp);
-            ctx->found_header_row = true;
-            elog(DEBUG1, "tossed %ld bytes in header row", offset);
-            elog(DEBUG1, "wrote %ld bytes to curl buffer", segsize - offset);
-        } else {
-            elog(DEBUG1, "tossed %ld bytes in header row", segsize);
-        }
-    } else {
-        fwrite(buffer, size, nmemb, ctx->datafp);
-        elog(DEBUG1, "wrote %ld bytes to curl buffer", segsize);
-    }
+    fwrite(buffer, size, nmemb, ctx->datafp);
+    elog(DEBUG1, "wrote %ld bytes to curl buffer", segsize);
 
     return segsize;
 }
@@ -615,6 +625,6 @@ body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 char *quasar_build_query(QuasarOpt *opt, ForeignScanState *node) {
     StringInfoData buf;
     initStringInfo(&buf);
-    appendStringInfo(&buf, "SELECT city FROM %s LIMIT 3", opt->table);
+    appendStringInfo(&buf, "SELECT city,state,pop FROM %s LIMIT 3", opt->table);
     return buf.data;
 }

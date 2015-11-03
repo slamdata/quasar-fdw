@@ -58,7 +58,6 @@ typedef struct quasar_ipc_context
     FILE       *datafp;
     char        flagfn[MAXPGPATH];
     FILE       *flagfp;
-    bool        found_header_row; /* False until header row has been tossed */
 } quasar_ipc_context;
 
 /* quasar_options.c headers */
