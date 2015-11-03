@@ -4,6 +4,19 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 ## WIP Status
 
+11/3/2015:
+- Did a ton of reading on the [oracle_fdw](https://github.com/laurenz/oracle_fdw). The oracle fdw pushes down a lot of WHERE clauses and only grabs the fields needed in those clauses.
+- I was able to get SELECT working by only grabbing the necessary columns, as desired in the `RelPlanInfo` (see [here](https://github.com/yanatan16/quasar_fdw/blob/8fa17d1cbb7e5d863885d060fdb154fdbe767471/src/quasar_fdw.c#L713))
+- However, there doesn't seem to be a way to tell postgres that "I'm only grabbing the columns you asked for." It seems to think you always are returning all the columns. In fact, oracle_fdw gives a Tuple with those dropped columns set to NULL [here](https://github.com/laurenz/oracle_fdw/blob/master/oracle_fdw.c#L4709).
+    - Implication: Instead of relying on the Copy protocol to read the CSV back from Quasar, I'll have to write my own parsing system and translate that to Tuples.
+    - Plan: Keep the forked curl piping to a FIFO file. Instead of passing to the Copy protocol to read, I'll read it as json into `libjson`. Once I've read a record, I parse that into a Tuple, similar to oracle_fdw.
+    - Benefits: This system can handle not requesting dropped columns, as well as the array types I'm pretty sure don't work with Copy/csv already.
+- Next Steps:
+    - Support `WHERE` clauses.
+    - Rewrite api response parsing (see above)
+    - Support `LIMIT` and `ORDER BY` (AFAICT oracle_fdw doesn't support these)
+    - Support `EXPLAIN` to add tests about what the query to Quasar should be
+
 11/2/2015:
 - Threw out `array.c`. As soon as I found out about postgres' linked list implementation, I started using that.
 - But, as far as I can tell, theres no way to build an executable against that code because its not wrapped up in a lib. Thus I couldn't run any tests over that code in an automatable way.
