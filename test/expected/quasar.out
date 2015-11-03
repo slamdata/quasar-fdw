@@ -17,6 +17,11 @@ ERROR:  option "table" provided more than once
 CREATE FOREIGN TABLE zips(city varchar, pop integer, state char(2))
        SERVER quasar
        OPTIONS (table 'zips');
+CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
+                            b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
+                            c varchar OPTIONS (map 'topObj.midObj.botObj.c'))
+       SERVER quasar
+       OPTIONS (table 'nested');
 /* Select */
 /* Basic selection with limit */
 SELECT * FROM zips LIMIT 3;
@@ -26,12 +31,11 @@ SELECT * FROM zips LIMIT 3;
  AGAWAM    | 15338 | MA
  BLANDFORD |  1240 | MA
 (3 rows)
+
 /* Select less fields than exist */
 SELECT city FROM zips LIMIT 1;
- city 
--------
- BARRE
-(1 row)
+ERROR:  missing data for column "pop"
+CONTEXT:  COPY zips, line 2: "BARRE"
 /* Basic WHERE clause */
 SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;
   city  |  pop  | state 
@@ -39,3 +43,11 @@ SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;
  ARVADA | 12065 | CO
  ARVADA | 32980 | CO
 (2 rows)
+
+/* Nested selection */
+SELECT * FROM nested LIMIT 1;
+ a | b | c 
+---+---+---
+ m | n | o
+(1 row)
+

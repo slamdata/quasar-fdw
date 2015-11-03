@@ -24,6 +24,7 @@
 
 #include "funcapi.h"
 #include "access/reloptions.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_user_mapping.h"
@@ -67,8 +68,10 @@ static struct QuasarFdwOption valid_options[] =
     /* Available options for CREATE SERVER */
     { "server",  ForeignServerRelationId },
     { "path",    ForeignServerRelationId },
-    /* Available options for CREATE TABLE */
+    /* Available options for CREATE FOREIGN TABLE */
     { "table",   ForeignTableRelationId },
+    /* Available options for columns inside CREATE FOREIGN TABLE */
+    { "map",     AttributeRelationId },
     /* Sentinel */
     { NULL,     InvalidOid }
 };
@@ -119,7 +122,7 @@ quasar_fdw_validator(PG_FUNCTION_ARGS)
             ereport(ERROR,
                 (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
                 errmsg("invalid option \"%s\"", def->defname),
-                errhint("Valid options in this context are: %s", buf.len ? buf.data : "<none>")
+                 errhint("Valid options in this context are: %s", buf.len ? buf.data : "<none>")
                 ));
         }
     }
