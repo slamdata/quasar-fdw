@@ -653,7 +653,7 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
         /* get PostgreSQL column number and type */
         if (index <= table->ncols)
         {
-            struct QuasarColumn *col = table->cols[index-1] = palloc(sizeof(struct QuasarColumn));
+            struct QuasarColumn *col = table->cols[index-1] = palloc0(sizeof(struct QuasarColumn));
             col->pgattnum = att_tuple->attnum;
             col->pgtype = att_tuple->atttypid;
             col->pgtypmod = att_tuple->atttypmod;
@@ -796,6 +796,7 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
             }
             else
             {
+                elog(DEBUG1, "quasar_fdw: column %s is used in statement", quasarTable->cols[index]->name);
                 quasarTable->cols[index]->used = 1;
             }
             break;
