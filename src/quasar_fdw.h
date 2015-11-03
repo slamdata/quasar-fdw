@@ -35,6 +35,15 @@ typedef struct QuasarOpt
 } QuasarOpt;
 
 /*
+ * This is what will be set and stashed away in fdw_private and fetched
+ * for subsequent routines.
+ */
+typedef struct QuasarFdwPlanState
+{
+    char *query;
+} QuasarFdwPlanState;
+
+/*
  * FDW-specific information for ForeignScanState
  * fdw_state.
  */
@@ -44,6 +53,24 @@ typedef struct QuasarFdwExecState
     CopyState   cstate;         /* state of reading file */
     char       *datafn;
 } QuasarFdwExecState;
+
+struct QuasarColumn
+{
+    char *name;              /* name in Quasar */
+    char *pgname;            /* PostgreSQL column name */
+    int pgattnum;            /* PostgreSQL attribute number */
+    Oid pgtype;              /* PostgreSQL data type */
+    int pgtypmod;            /* PostgreSQL type modification */
+    int used;                /* is the column used in the query? */
+};
+
+struct QuasarTable
+{
+    char *name;    /* name in Quasar */
+    char *pgname;  /* PostgrSQL table name */
+    int ncols;     /* number of columns */
+    struct QuasarColumn **cols;
+};
 
 
 /*

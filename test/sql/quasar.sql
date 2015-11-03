@@ -12,4 +12,9 @@ CREATE FOREIGN TABLE zips(city varchar, pop integer, state char(2))
        SERVER quasar
        OPTIONS (table 'zips');
 /* Select */
+/* Basic selection with limit */
 SELECT * FROM zips LIMIT 3;
+/* Select less fields than exist */
+SELECT city FROM zips LIMIT 1;
+/* Basic WHERE clause */
+SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;

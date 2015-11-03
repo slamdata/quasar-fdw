@@ -41,6 +41,7 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "utils/elog.h"
+#include "utils/lsyscache.h"
 
 #include <curl/curl.h>
 
@@ -98,17 +99,9 @@ static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 /*
  * Private functions
  */
-char *quasar_build_query(QuasarOpt *opt, ForeignScanState *node);
-
-/*
- * This is what will be set and stashed away in fdw_private and fetched
- * for subsequent routines.
- */
-typedef struct
-{
-      char     *foo;
-      int       bar;
-} QuasarFdwPlanState;
+void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan);
+struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt);
+void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable);
 
 
 /*
@@ -183,17 +176,21 @@ quasarGetForeignRelSize(PlannerInfo *root,
        * can compute a better estimate of the average result row width.
        */
 
-      QuasarFdwPlanState *fdw_private;
+      QuasarFdwPlanState *fdwState;
 
       elog(DEBUG1, "entering function %s", __func__);
 
       baserel->rows = 0;
 
-      fdw_private = palloc0(sizeof(QuasarFdwPlanState));
-      baserel->fdw_private = (void *) fdw_private;
+      fdwState = palloc0(sizeof(QuasarFdwPlanState));
+      baserel->fdw_private = (void *) fdwState;
 
       /* initialize required state in fdw_private */
 
+      QuasarOpt *opt = quasar_get_options(foreigntableid);
+      struct QuasarTable *qTable = getQuasarTable(foreigntableid, opt);
+      createQuery(baserel, qTable, fdwState);
+      elog(DEBUG1, "quasar_fdw: query is %s", fdwState->query);
 }
 
 static void
@@ -224,7 +221,7 @@ quasarGetForeignPaths(PlannerInfo *root,
 
       elog(DEBUG1, "entering function %s", __func__);
 
-      startup_cost = 0;
+      startup_cost = 100;
       total_cost = startup_cost + baserel->rows;
 
       /* Create a ForeignPath node and add it as only possible path */
@@ -260,33 +257,27 @@ quasarGetForeignPlan(PlannerInfo *root,
        *
        */
 
-      Index       scan_relid = baserel->relid;
-
-      /*
-       * We have no native ability to evaluate restriction clauses, so we just
-       * put all the scan_clauses into the plan node's qual list for the
-       * executor to check. So all we have to do here is strip RestrictInfo
-       * nodes from the clauses and ignore pseudoconstants (which will be
-       * handled elsewhere).
-       */
-
       elog(DEBUG1, "entering function %s", __func__);
 
+      QuasarFdwPlanState *fdwPlan = (QuasarFdwPlanState*) baserel->fdw_private;
+      List * fdw_private = list_make1(fdwPlan->query);
+
       scan_clauses = extract_actual_clauses(scan_clauses, false);
+
 
       /* Create the ForeignScan node */
 #if(PG_VERSION_NUM < 90500)
       return make_foreignscan(tlist,
                               scan_clauses,
-                              scan_relid,
+                              baserel->relid,
                               NIL,  /* no expressions to evaluate */
-                              NIL);       /* no private state either */
+                              fdw_private);       /* no private state either */
 #else
       return make_foreignscan(tlist,
                               scan_clauses,
-                              scan_relid,
+                              baserel->relid,
                               NIL,  /* no expressions to evaluate */
-                              NIL,  /* no private state either */
+                              fdw_private,  /* no private state either */
                               NIL);       /* no private state either */
 #endif
 
@@ -327,6 +318,7 @@ quasarBeginForeignScan(ForeignScanState *node,
       char       *url, *query, *prefix;
       pid_t       pid;
       quasar_ipc_context ctx;
+      List *fdw_private = ((ForeignScan*)node->ss.ps.plan)->fdw_private;
 
 
       /*
@@ -351,8 +343,7 @@ quasarBeginForeignScan(ForeignScanState *node,
                        opt->server, opt->path);
       url = buf.data;
 
-      //TODO FILL IN QUERY
-      query = quasar_build_query(opt, node);
+      query = (char *) lfirst(list_head(fdw_private));
 
       prefix = create_tempprefix();
       snprintf(ctx.flagfn, sizeof(ctx.flagfn), "%s.flag", prefix);
@@ -622,9 +613,365 @@ body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 }
 
 
-char *quasar_build_query(QuasarOpt *opt, ForeignScanState *node) {
-    StringInfoData buf;
-    initStringInfo(&buf);
-    appendStringInfo(&buf, "SELECT city,state,pop FROM %s LIMIT 3", opt->table);
-    return buf.data;
+/* getQuasarTable
+ *     Retrieve information on a QuasarTable
+ */
+struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
+    Relation rel;
+    TupleDesc tupdesc;
+    int i, index;
+
+    elog(DEBUG1, "entering function %s", __func__);
+
+    struct QuasarTable *table = palloc(sizeof(struct QuasarTable));
+    table->pgname = get_rel_name(foreigntableid);
+    table->name = opt->table;
+
+    /* Grab the foreign table relation from the PostgreSQL catalog */
+    rel = heap_open(foreigntableid, NoLock);
+    tupdesc = rel->rd_att;
+
+    /* number of PostgreSQL columns */
+    table->ncols = tupdesc->natts;
+    elog(DEBUG1, "quasar_fdw table: pgname %s name %s ncols %d", table->pgname, table->name, table->ncols);
+
+    table->cols = palloc(table->ncols * sizeof(struct QuasarColumn *));
+
+    /* loop through foreign table columns */
+    index = 0;
+    for (i=0; i<tupdesc->natts; ++i)
+    {
+        Form_pg_attribute att_tuple = tupdesc->attrs[i];
+        List *options;
+        ListCell *option;
+
+        /* ignore dropped columns */
+        if (att_tuple->attisdropped)
+            continue;
+
+        ++index;
+        /* get PostgreSQL column number and type */
+        if (index <= table->ncols)
+        {
+            struct QuasarColumn *col = table->cols[index-1] = palloc(sizeof(struct QuasarColumn));
+            col->pgattnum = att_tuple->attnum;
+            col->pgtype = att_tuple->atttypid;
+            col->pgtypmod = att_tuple->atttypmod;
+            col->pgname = pstrdup(NameStr(att_tuple->attname));
+            col->name = NULL;
+
+            /* loop through column options */
+            options = GetForeignColumnOptions(foreigntableid, att_tuple->attnum);
+            foreach(option, options)
+            {
+                DefElem *def = (DefElem *)lfirst(option);
+
+                /* Allow users to map column names */
+                if (strcmp(def->defname, "map") == 0)
+                {
+                    col->name = defGetString(def);
+                }
+            }
+
+            if (col->name == NULL) {
+                col->name = pstrdup(col->pgname);
+            }
+
+            elog(DEBUG1, "quasar_fdw column: pgname %s name %s index %dnum %d atttypid %d addtypmod %d", col->pgname, col->name, index-1, col->pgattnum, col->pgtype, col->pgtypmod);
+        }
+    }
+
+    heap_close(rel, NoLock);
+
+    return table;
+}
+
+/*
+ * createQuery
+ *      Construct a query string for Quasar that
+ *      a) contains only the necessary columns in the SELECT list
+ *      b) has all the WHERE clauses that can safely be translated to Quasar.
+ *      Untranslatable WHERE clauses are omitted and left for PostgreSQL to check.
+ *      In "pushdown_clauses" an array is stored that contains "true" for all clauses
+ *      that will be pushed down and "false" for those that are filtered locally.
+ *      As a side effect, we also mark the used columns in quasarTable.
+ */
+void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan)
+{
+    ListCell *cell;
+    bool first_col = true;
+    int i;
+    StringInfoData query;
+    List *columnlist = foreignrel->reltargetlist,
+        *conditions = foreignrel->baserestrictinfo;
+
+    elog(DEBUG1, "entering function %s", __func__);
+
+    /* first, find all the columns to include in the select list */
+
+    /* examine each SELECT list entry for Var nodes */
+    foreach(cell, columnlist)
+    {
+        getUsedColumns((Expr *)lfirst(cell), quasarTable);
+    }
+
+    /* examine each condition for Var nodes */
+    foreach(cell, conditions)
+    {
+        getUsedColumns((Expr *)lfirst(cell), quasarTable);
+    }
+
+    /* construct SELECT list */
+    initStringInfo(&query);
+    appendStringInfo(&query, "SELECT ");
+    for (i=0; i<quasarTable->ncols; ++i)
+    {
+        if (quasarTable->cols[i]->used)
+        {
+            if (first_col)
+            {
+                first_col = false;
+                appendStringInfo(&query, "%s", quasarTable->cols[i]->name);
+            }
+            else
+            {
+                appendStringInfo(&query, ", %s", quasarTable->cols[i]->name);
+            }
+        }
+    }
+    /* dummy column if there is no result column we need from Quasar */
+    if (first_col)
+        appendStringInfo(&query, "'1'");
+    appendStringInfo(&query, " FROM %s", quasarTable->name);
+
+    plan->query = query.data;
+}
+
+/*
+ * getUsedColumns
+ *      Set "used=true" in quasarTable for all columns used in the expression.
+ */
+void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
+{
+    ListCell *cell;
+    Var *variable;
+    int index;
+
+    elog(DEBUG1, "entering function %s", __func__);
+
+    if (expr == NULL)
+        return;
+
+    switch(expr->type)
+    {
+        case T_RestrictInfo:
+            getUsedColumns(((RestrictInfo *)expr)->clause, quasarTable);
+            break;
+        case T_TargetEntry:
+            getUsedColumns(((TargetEntry *)expr)->expr, quasarTable);
+            break;
+        case T_Const:
+        case T_Param:
+        case T_CaseTestExpr:
+        case T_CoerceToDomainValue:
+        case T_CurrentOfExpr:
+            break;
+        case T_Var:
+            variable = (Var *)expr;
+
+            /* ignore system columns */
+            if (variable->varattno < 1)
+                break;
+
+            /* get quasarTable column index corresponding to this column (-1 if none) */
+            index = quasarTable->ncols - 1;
+            while (index >= 0 && quasarTable->cols[index]->pgattnum != variable->varattno)
+                --index;
+
+            if (index == -1)
+            {
+                ereport(WARNING,
+                        (errcode(ERRCODE_WARNING),
+                        errmsg("column number %d of foreign table \"%s\" does not exist in foreign Quasar table, will be replaced by NULL", variable->varattno, quasarTable->pgname)));
+            }
+            else
+            {
+                quasarTable->cols[index]->used = 1;
+            }
+            break;
+        case T_Aggref:
+            foreach(cell, ((Aggref *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            foreach(cell, ((Aggref *)expr)->aggorder)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            foreach(cell, ((Aggref *)expr)->aggdistinct)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_WindowFunc:
+            foreach(cell, ((WindowFunc *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_ArrayRef:
+            foreach(cell, ((ArrayRef *)expr)->refupperindexpr)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            foreach(cell, ((ArrayRef *)expr)->reflowerindexpr)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            getUsedColumns(((ArrayRef *)expr)->refexpr, quasarTable);
+            getUsedColumns(((ArrayRef *)expr)->refassgnexpr, quasarTable);
+            break;
+        case T_FuncExpr:
+            foreach(cell, ((FuncExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_OpExpr:
+            foreach(cell, ((OpExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_DistinctExpr:
+            foreach(cell, ((DistinctExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_NullIfExpr:
+            foreach(cell, ((NullIfExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_ScalarArrayOpExpr:
+            foreach(cell, ((ScalarArrayOpExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_BoolExpr:
+            foreach(cell, ((BoolExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_SubPlan:
+            foreach(cell, ((SubPlan *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_AlternativeSubPlan:
+            /* examine only first alternative */
+            getUsedColumns((Expr *)linitial(((AlternativeSubPlan *)expr)->subplans), quasarTable);
+            break;
+        case T_NamedArgExpr:
+            getUsedColumns(((NamedArgExpr *)expr)->arg, quasarTable);
+            break;
+        case T_FieldSelect:
+            getUsedColumns(((FieldSelect *)expr)->arg, quasarTable);
+            break;
+        case T_RelabelType:
+            getUsedColumns(((RelabelType *)expr)->arg, quasarTable);
+            break;
+        case T_CoerceViaIO:
+            getUsedColumns(((CoerceViaIO *)expr)->arg, quasarTable);
+            break;
+        case T_ArrayCoerceExpr:
+            getUsedColumns(((ArrayCoerceExpr *)expr)->arg, quasarTable);
+            break;
+        case T_ConvertRowtypeExpr:
+            getUsedColumns(((ConvertRowtypeExpr *)expr)->arg, quasarTable);
+            break;
+        case T_CollateExpr:
+            getUsedColumns(((CollateExpr *)expr)->arg, quasarTable);
+            break;
+        case T_CaseExpr:
+            foreach(cell, ((CaseExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            getUsedColumns(((CaseExpr *)expr)->arg, quasarTable);
+            getUsedColumns(((CaseExpr *)expr)->defresult, quasarTable);
+            break;
+        case T_CaseWhen:
+            getUsedColumns(((CaseWhen *)expr)->expr, quasarTable);
+            getUsedColumns(((CaseWhen *)expr)->result, quasarTable);
+            break;
+        case T_ArrayExpr:
+            foreach(cell, ((ArrayExpr *)expr)->elements)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_RowExpr:
+            foreach(cell, ((RowExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_RowCompareExpr:
+            foreach(cell, ((RowCompareExpr *)expr)->largs)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            foreach(cell, ((RowCompareExpr *)expr)->rargs)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_CoalesceExpr:
+            foreach(cell, ((CoalesceExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_MinMaxExpr:
+            foreach(cell, ((MinMaxExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_XmlExpr:
+            foreach(cell, ((XmlExpr *)expr)->named_args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            foreach(cell, ((XmlExpr *)expr)->args)
+            {
+                getUsedColumns((Expr *)lfirst(cell), quasarTable);
+            }
+            break;
+        case T_NullTest:
+            getUsedColumns(((NullTest *)expr)->arg, quasarTable);
+            break;
+        case T_BooleanTest:
+            getUsedColumns(((BooleanTest *)expr)->arg, quasarTable);
+            break;
+        case T_CoerceToDomain:
+            getUsedColumns(((CoerceToDomain *)expr)->arg, quasarTable);
+            break;
+        default:
+            /*
+             * We must be able to handle all node types that can
+             * appear because we cannot omit a column from the remote
+             * query that will be needed.
+             * Throw an error if we encounter an unexpected node type.
+             */
+            ereport(ERROR,
+                    (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
+                    errmsg("Internal quasar_fdw error: encountered unknown node type %d.", expr->type)));
+    }
 }
