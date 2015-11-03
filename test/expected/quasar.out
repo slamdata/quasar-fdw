@@ -14,13 +14,17 @@ HINT:  Valid options in this context are: table
 CREATE FOREIGN TABLE ft2(id integer) SERVER quasar OPTIONS (table 'bar');
 CREATE FOREIGN TABLE ft3(id integer) SERVER quasar OPTIONS (table 'bar', table 'baz');
 ERROR:  option "table" provided more than once
-CREATE FOREIGN TABLE zips(city varchar, loc float[2], pop integer, state char(2))
+CREATE FOREIGN TABLE zips(city varchar)
        SERVER quasar
        OPTIONS (table 'zips');
+/* User Mapping */
+CREATE USER MAPPING FOR current_user SERVER quasar;
 /* Select */
-  city
----------
-BARRE
-AGAWAM
-BLANDFORD
+SELECT city FROM zips LIMIT 3;
+   city    
+-----------
+ BARRE
+ AGAWAM
+ BLANDFORD
 (3 rows)
+

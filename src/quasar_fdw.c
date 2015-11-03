@@ -13,19 +13,33 @@
  *
  *-------------------------------------------------------------------------
  */
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include "postgres.h"
+
+#include "quasar_fdw.h"
 
 #include "access/reloptions.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
+#include "commands/copy.h"
 #include "commands/defrem.h"
+#include "executor/executor.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
+#include "miscadmin.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "postmaster/fork_process.h"
+#include "storage/fd.h"
+#include "storage/ipc.h"
+#include "utils/elog.h"
+
+#include <curl/curl.h>
 
 PG_MODULE_MAGIC;
 
@@ -33,10 +47,8 @@ PG_MODULE_MAGIC;
  * SQL functions
  */
 extern Datum quasar_fdw_handler(PG_FUNCTION_ARGS);
-extern Datum quasar_fdw_validator(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(quasar_fdw_handler);
-PG_FUNCTION_INFO_V1(quasar_fdw_validator);
 
 
 /* callback functions */
@@ -70,29 +82,10 @@ static void quasarEndForeignScan(ForeignScanState *node);
 
 
 /*
- * structures used by the FDW
- *
- *
+ * Curl callback functions
  */
-
-/*
- * Describes the valid options for objects that use this wrapper.
- */
-struct quasarFdwOption
-{
-    const char *optname;
-    Oid        optcontext;       /* Oid of catalog in which option may appear */
-};
-
-static struct quasarFdwOption valid_options[] =
-    {
-        /* Available options for CREATE SERVER */
-        { "server",  ForeignServerRelationId },
-        { "path",    ForeignServerRelationId },
-        /* Available options for CREATE TABLE */
-        { "table",   ForeignTableRelationId },
-        { NULL,     InvalidOid }
-    };
+static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf);
+static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 
 /*
  * This is what will be set and stashed away in fdw_private and fetched
@@ -137,92 +130,6 @@ quasar_fdw_handler(PG_FUNCTION_ARGS)
       PG_RETURN_POINTER(fdwroutine);
 }
 
-static bool
-quasarIsValidOption(const char *option, Oid context)
-{
-    struct quasarFdwOption *opt;
-
-    for (opt = valid_options; opt->optname; opt++)
-    {
-        if (context == opt->optcontext && strcmp(opt->optname, option) == 0)
-            return true;
-    }
-    return false;
-}
-
-Datum
-quasar_fdw_validator(PG_FUNCTION_ARGS)
-{
-    List     *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
-    Oid       catalog = PG_GETARG_OID(1);
-    ListCell  *cell;
-    char      *quasar_server = NULL;
-    char      *quasar_path = NULL;
-    char      *quasar_table = NULL;
-
-    elog(DEBUG1, "entering function %s", __func__);
-
-    /* make sure the options are valid */
-
-    foreach(cell, options_list) {
-        DefElem    *def = (DefElem *) lfirst(cell);
-
-        if (!quasarIsValidOption(def->defname, catalog)) {
-            struct quasarFdwOption *opt;
-            StringInfoData buf;
-
-            /*
-             * Unknown option specified, complain about it. Provide a hint
-             * with list of valid options for the object.
-             */
-            initStringInfo(&buf);
-            for (opt = valid_options; opt->optname; opt++)
-            {
-                if (catalog == opt->optcontext)
-                    appendStringInfo(&buf, "%s%s", (buf.len > 0) ? ", " : "",
-                                     opt->optname);
-            }
-
-            ereport(ERROR,
-                    (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-                     errmsg("invalid option \"%s\"", def->defname),
-                     errhint("Valid options in this context are: %s", buf.len ? buf.data : "<none>")
-                     ));
-        }
-
-        /*
-         * Here is the code for the valid options
-         */
-
-        if (strcmp(def->defname, "server") == 0) {
-            if (quasar_server)
-                ereport(ERROR,
-                        (errcode(ERRCODE_SYNTAX_ERROR),
-                         errmsg("redundant options: server (%s)", defGetString(def))
-                         ));
-
-            quasar_server = defGetString(def);
-        } else if (strcmp(def->defname, "path") == 0) {
-            if (quasar_path)
-                ereport(ERROR,
-                        (errcode(ERRCODE_SYNTAX_ERROR),
-                         errmsg("redundant options: path (%s)", defGetString(def))
-                         ));
-
-            quasar_path = defGetString(def);
-        } else if (strcmp(def->defname, "table") == 0) {
-            if (quasar_table)
-                ereport(ERROR,
-                        (errcode(ERRCODE_SYNTAX_ERROR),
-                         errmsg("redundant options: table (%s)", defGetString(def))
-                         ));
-
-            quasar_table = defGetString(def);
-        }
-    }
-
-    PG_RETURN_VOID();
-}
 
 #if (PG_VERSION_NUM >= 90200)
 static void
@@ -384,6 +291,151 @@ quasarBeginForeignScan(ForeignScanState *node,
 
       elog(DEBUG1, "entering function %s", __func__);
 
+      CopyState   cstate;
+      QuasarFdwExecState *festate;
+      QuasarOpt *opt;
+      StringInfoData buf;
+      char       *url, *query, *signature, *prefix;
+      pid_t       pid;
+      quasar_ipc_context ctx;
+
+      /*
+       * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
+       */
+      if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+          return;
+
+      festate = (QuasarFdwExecState *) palloc(sizeof(QuasarFdwExecState));
+      /* Fetch options of foreign table */
+      opt = quasar_get_options(RelationGetRelid(node->ss.ss_currentRelation));
+
+      initStringInfo(&buf);
+      appendStringInfo(&buf, "%s/query/fs%s?q=",
+                       opt->server, opt->path);
+      url = pstrdup(buf.data);
+
+      //TODO FILL IN QUERY
+      resetStringInfo(&buf);
+      appendStringInfo(&buf, "SELECT city FROM %s LIMIT 3", opt->table);
+      query = pstrdup(buf.data);
+      pfree(buf.data);
+
+      signature = quasar_signature(query, opt->server, opt->path);
+      prefix = create_tempprefix(signature);
+
+      snprintf(ctx.flagfn, sizeof(ctx.flagfn), "%s.flag", prefix);
+      snprintf(ctx.datafn, sizeof(ctx.datafn), "%s.data", prefix);
+      //  unlink(ctx.flagfn);
+      //  unlink(ctx.datafn);
+      if (mkfifo(ctx.flagfn, S_IRUSR | S_IWUSR) != 0)
+          elog(ERROR, "mkfifo failed(%d):%s", errno, ctx.flagfn);
+      if (mkfifo(ctx.datafn, S_IRUSR | S_IWUSR) != 0)
+          elog(ERROR, "mkfifo failed(%d):%s", errno, ctx.datafn);
+      ctx.found_header_row = false;
+
+
+      /*
+       * Fork to maximize parallelism of input from HTTP and output to SQL.
+       * The spawned child process cheats by on_exit_rest() to die immediately.
+       */
+      pid = fork_process();
+      if (pid == 0)           /* child */
+      {
+          struct curl_slist *headers;
+          CURL       *curl;
+          int         sc;
+          StringInfoData urlbuf;
+          char *query_encoded;
+
+          MyProcPid = getpid();   /* reset MyProcPid */
+
+          curl = curl_easy_init();
+
+          /*
+           * The exit callback routines clean up
+           * unnecessary resources holded the parent process.
+           * The child dies silently when finishing its job.
+           */
+          on_exit_reset();
+
+          /*
+           * Set up request header list
+           */
+          headers = NULL;
+          headers = curl_slist_append(headers, "Accept: text/csv");
+
+          /*
+           * Encode query
+           */
+          query_encoded = curl_easy_escape(curl, query, 0);
+          initStringInfo(&urlbuf);
+          appendStringInfo(&urlbuf, "%s%s", url, query_encoded);
+
+          /*
+           * Set up CURL instance.
+           */
+          curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+          curl_easy_setopt(curl, CURLOPT_URL, urlbuf.data);
+          curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+          curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
+          curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
+          curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_handler);
+          curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+
+          elog(DEBUG1, "curling %s", urlbuf.data);
+          sc = curl_easy_perform(curl);
+          if (ctx.datafp)
+              FreeFile(ctx.datafp);
+          if (sc != 0)
+          {
+              elog(NOTICE, "%s:curl_easy_perform = %d", url, sc);
+              unlink(ctx.datafn);
+          }
+          curl_slist_free_all(headers);
+          curl_easy_cleanup(curl);
+          pfree(urlbuf.data);
+          curl_free(query_encoded);
+          pfree(query);
+          pfree(url);
+
+          proc_exit(0);
+      }
+      elog(DEBUG1, "child pid = %d", pid);
+
+      {
+          int     status;
+          FILE   *fp;
+
+          fp = AllocateFile(ctx.flagfn, PG_BINARY_R);
+          read(fileno(fp), &status, sizeof(int));
+          FreeFile(fp);
+          unlink(ctx.flagfn);
+          if (status != 200)
+          {
+              elog(ERROR, "bad input from API. Status code: %d", status);
+          }
+      }
+
+      /*
+       * Create CopyState from FDW options.  We always acquire all columns, so
+       * as to match the expected ScanTupleSlot signature.
+       */
+      cstate = BeginCopyFrom(node->ss.ss_currentRelation,
+                             ctx.datafn,
+                             false,
+                             NIL,
+                             festate->copy_options);
+
+      /*
+       * Save state in node->fdw_state.  We must save enough information to call
+       * BeginCopyFrom() again.
+       */
+      festate->cstate = cstate;
+      festate->datafn = pstrdup(ctx.datafn);
+
+      node->fdw_state = (void *) festate;
+
+      pfree(opt);
 }
 
 
@@ -414,35 +466,42 @@ quasarIterateForeignScan(ForeignScanState *node)
        * (just as you would need to do in the case of a data type mismatch).
        */
 
+    elog(DEBUG1, "entering function %s", __func__);
 
-      /*
-       * QuasarFdwExecutionState *festate = (QuasarFdwExecutionState *)
-       * node->fdw_state;
-       */
-      TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+    QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
+    TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+    bool found;
+    ErrorContextCallback errctx;
 
-      elog(DEBUG1, "entering function %s", __func__);
+    /* Set up callback to identify error line number. */
+    errctx.callback = CopyFromErrorCallback;
+    errctx.arg = (void *) festate->cstate;
+    errctx.previous = error_context_stack;
+    error_context_stack = &errctx;
 
-      ExecClearTuple(slot);
+    /*
+     * The protocol for loading a virtual tuple into a slot is first
+     * ExecClearTuple, then fill the values/isnull arrays, then
+     * ExecStoreVirtualTuple.  If we don't find another row in the file, we
+     * just skip the last step, leaving the slot empty as required.
+     *
+     * We can pass ExprContext = NULL because we read all columns from the
+     * file, so no need to evaluate default expressions.
+     *
+     * We can also pass tupleOid = NULL because we don't allow oids for
+     * foreign tables.
+     */
+    ExecClearTuple(slot);
+    found = NextCopyFrom(festate->cstate, NULL,
+                         slot->tts_values, slot->tts_isnull,
+                         NULL);
+    if (found)
+        ExecStoreVirtualTuple(slot);
 
-      /* get the next record, if any, and fill in the slot */
+    /* Remove error callback. */
+    error_context_stack = errctx.previous;
 
-      /* then return the slot */
-      return slot;
-}
-
-
-static void
-quasarReScanForeignScan(ForeignScanState *node)
-{
-      /*
-       * Restart the scan from the beginning. Note that any parameters the scan
-       * depends on may have changed value, so the new scan does not necessarily
-       * return exactly the same rows.
-       */
-
-      elog(DEBUG1, "entering function %s", __func__);
-
+    return slot;
 }
 
 
@@ -457,4 +516,95 @@ quasarEndForeignScan(ForeignScanState *node)
 
       elog(DEBUG1, "entering function %s", __func__);
 
+      QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
+      /* if festate is NULL, we are in EXPLAIN; nothing to do */
+      if (festate) {
+          EndCopyFrom(festate->cstate);
+          unlink(festate->datafn);
+      }
+}
+
+ static void
+     quasarReScanForeignScan(ForeignScanState *node) {
+    /*
+     * Restart the scan from the beginning. Note that any parameters the scan
+     * depends on may have changed value, so the new scan does not necessarily
+     * return exactly the same rows.
+     */
+
+    elog(DEBUG1, "entering function %s", __func__);
+
+    QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
+
+    EndCopyFrom(festate->cstate);
+
+    festate->cstate = BeginCopyFrom(node->ss.ss_currentRelation,
+        festate->datafn,
+        false,
+        NIL,
+        festate->copy_options);
+
+}
+
+
+/*
+ * Curl callback functions
+ */
+
+static size_t
+header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
+{
+    elog(DEBUG1, "entering function %s", __func__);
+    const char *HTTP_1_1 = "HTTP/1.1";
+    size_t      segsize = size * nmemb;
+    quasar_ipc_context *ctx = (quasar_ipc_context *) userp;
+
+    if (strncmp(buffer, HTTP_1_1, strlen(HTTP_1_1)) == 0)
+    {
+        int     status;
+
+        status = atoi((char *) buffer + strlen(HTTP_1_1) + 1);
+        elog(DEBUG1, "curl response status %d", status);
+        ctx->flagfp = AllocateFile(ctx->flagfn, PG_BINARY_W);
+        write(fileno(ctx->flagfp), &status, sizeof(int));
+        FreeFile(ctx->flagfp);
+        if (status != 200)
+        {
+            ctx->datafp = NULL;
+            /* interrupt */
+            return 0;
+        }
+        /* iif success */
+        ctx->datafp = AllocateFile(ctx->datafn, PG_BINARY_W);
+    }
+
+    return segsize;
+}
+
+static size_t
+body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
+{
+    elog(DEBUG1, "entering function %s", __func__);
+    char * post_header_row;
+    size_t offset;
+    size_t      segsize = size * nmemb;
+    quasar_ipc_context *ctx = (quasar_ipc_context *) userp;
+
+    if (!ctx->found_header_row) {
+        post_header_row = strchr((char*) buffer, '\n');
+        if (post_header_row) {
+            offset = post_header_row - ((char*) buffer) + 1;
+            fwrite(post_header_row + 1, 1, segsize - offset, ctx->datafp);
+            ctx->found_header_row = true;
+            elog(DEBUG1, "tossed %ld bytes in header row", offset);
+            elog(DEBUG1, "wrote %ld bytes to curl buffer", segsize - offset);
+        } else {
+            elog(DEBUG1, "tossed %ld bytes in header row", segsize);
+        }
+    } else {
+        fwrite(buffer, size, nmemb, ctx->datafp);
+        elog(DEBUG1, "wrote %ld bytes to curl buffer", segsize);
+    }
+
+    return segsize;
 }

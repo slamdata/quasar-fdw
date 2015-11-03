@@ -1,2 +1,6 @@
 test/unit/unit-test
 *.o
+sql/*--*sql
+test/regression.*
+test/results/*
+*.so

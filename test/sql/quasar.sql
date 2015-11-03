@@ -8,8 +8,10 @@ CREATE FOREIGN TABLE ft0(id integer) SERVER quasar;
 CREATE FOREIGN TABLE ft1(id integer) SERVER quasar OPTIONS (wrong 'foo');
 CREATE FOREIGN TABLE ft2(id integer) SERVER quasar OPTIONS (table 'bar');
 CREATE FOREIGN TABLE ft3(id integer) SERVER quasar OPTIONS (table 'bar', table 'baz');
-CREATE FOREIGN TABLE zips(city varchar, loc float[2], pop integer, state char(2))
+CREATE FOREIGN TABLE zips(city varchar)
        SERVER quasar
        OPTIONS (table 'zips');
+/* User Mapping */
+CREATE USER MAPPING FOR current_user SERVER quasar;
 /* Select */
 SELECT city FROM zips LIMIT 3;
