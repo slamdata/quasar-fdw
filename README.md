@@ -4,6 +4,9 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 ## WIP Status
 
+11/4/2015:
+- I found out a way to tell the Copy command that we're only grabbing certain fields ([here](https://github.com/postgres/postgres/blob/master/src/backend/commands/copy.c#L2603)). This solves one problem I had last week without rewriting the parser. If I can leverage `AS` syntax to overcome parsing arrays, I might be able to not have to rewrite the parser at all.
+
 11/3/2015:
 - Did a ton of reading on the [oracle_fdw](https://github.com/laurenz/oracle_fdw). The oracle fdw pushes down a lot of WHERE clauses and only grabs the fields needed in those clauses.
 - I was able to get SELECT working by only grabbing the necessary columns, as desired in the `RelPlanInfo` (see [here](https://github.com/yanatan16/quasar_fdw/blob/8fa17d1cbb7e5d863885d060fdb154fdbe767471/src/quasar_fdw.c#L713))

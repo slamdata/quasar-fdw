@@ -25,3 +25,5 @@ SELECT city FROM zips LIMIT 1;
 SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;
 /* Nested selection */
 SELECT * FROM nested LIMIT 1;
+/* less fields than in relation, with one in a WHERE clause */
+SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;

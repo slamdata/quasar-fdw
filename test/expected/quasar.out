@@ -34,8 +34,11 @@ SELECT * FROM zips LIMIT 3;
 
 /* Select less fields than exist */
 SELECT city FROM zips LIMIT 1;
-ERROR:  missing data for column "pop"
-CONTEXT:  COPY zips, line 2: "BARRE"
+ city  
+-------
+ BARRE
+(1 row)
+
 /* Basic WHERE clause */
 SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;
   city  |  pop  | state 
@@ -51,3 +54,9 @@ SELECT * FROM nested LIMIT 1;
  m | n | o
 (1 row)
 
+/* less fields than in relation, with one in a WHERE clause */
+SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
+  city  
+--------
+ ARVADA
+(1 row)

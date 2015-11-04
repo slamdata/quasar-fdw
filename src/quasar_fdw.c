@@ -260,7 +260,7 @@ quasarGetForeignPlan(PlannerInfo *root,
       elog(DEBUG1, "entering function %s", __func__);
 
       QuasarFdwPlanState *fdwPlan = (QuasarFdwPlanState*) baserel->fdw_private;
-      List * fdw_private = list_make1(fdwPlan->query);
+      List * fdw_private = list_make2(fdwPlan->query, fdwPlan->columns);
 
       scan_clauses = extract_actual_clauses(scan_clauses, false);
 
@@ -315,10 +315,12 @@ quasarBeginForeignScan(ForeignScanState *node,
       QuasarFdwExecState *festate;
       QuasarOpt *opt;
       StringInfoData buf;
-      char       *url, *query, *prefix;
+      char       *url, *prefix;
       pid_t       pid;
       quasar_ipc_context ctx;
       List *fdw_private = ((ForeignScan*)node->ss.ps.plan)->fdw_private;
+      char *query = (char*) linitial(fdw_private);
+      List *columns = (List*) lsecond(fdw_private);
 
 
       /*
@@ -436,6 +438,11 @@ quasarBeginForeignScan(ForeignScanState *node,
           }
       }
 
+      ListCell *lc;
+      foreach(lc, columns) {
+          elog(DEBUG1, "quasar_fdw: Column list: %s", lfirst(lc));
+      }
+
       /*
        * Create CopyState from FDW options.  We always acquire all columns, so
        * as to match the expected ScanTupleSlot signature.
@@ -443,7 +450,7 @@ quasarBeginForeignScan(ForeignScanState *node,
       cstate = BeginCopyFrom(node->ss.ss_currentRelation,
                              ctx.datafn,
                              false,
-                             NIL,
+                             columns,
                              festate->copy_options);
 
       /*
@@ -703,7 +710,9 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
     int i;
     StringInfoData query;
     List *columnlist = foreignrel->reltargetlist,
-        *conditions = foreignrel->baserestrictinfo;
+        *conditions = foreignrel->baserestrictinfo,
+        *used_columns = NIL;
+    struct QuasarColumn *col;
 
     elog(DEBUG1, "entering function %s", __func__);
 
@@ -726,16 +735,20 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
     appendStringInfo(&query, "SELECT ");
     for (i=0; i<quasarTable->ncols; ++i)
     {
-        if (quasarTable->cols[i]->used)
+        col = quasarTable->cols[i];
+        if (col->used)
         {
-            if (first_col)
+            used_columns = lappend(used_columns, makeString(col->pgname));
+            if (!first_col)
             {
+                appendStringInfo(&query, ", ");
+            } else {
                 first_col = false;
-                appendStringInfo(&query, "%s", quasarTable->cols[i]->name);
             }
-            else
-            {
-                appendStringInfo(&query, ", %s", quasarTable->cols[i]->name);
+            if (strcmp(col->name, col->pgname) != 0) {
+                appendStringInfo(&query, "%s AS %s", col->name, col->pgname);
+            } else {
+                appendStringInfo(&query, "%s", col->name);
             }
         }
     }
@@ -744,7 +757,10 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
         appendStringInfo(&query, "'1'");
     appendStringInfo(&query, " FROM %s", quasarTable->name);
 
-    plan->query = query.data;
+    plan->query = pstrdup(query.data);
+    plan->columns = used_columns;
+
+    pfree(query.data);
 }
 
 /*

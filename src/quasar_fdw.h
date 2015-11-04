@@ -41,6 +41,7 @@ typedef struct QuasarOpt
 typedef struct QuasarFdwPlanState
 {
     char *query;
+    List *columns;
 } QuasarFdwPlanState;
 
 /*
