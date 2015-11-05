@@ -6,6 +6,14 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 11/4/2015:
 - I found out a way to tell the Copy command that we're only grabbing certain fields ([here](https://github.com/postgres/postgres/blob/master/src/backend/commands/copy.c#L2603)). This solves one problem I had last week without rewriting the parser. If I can leverage `AS` syntax to overcome parsing arrays, I might be able to not have to rewrite the parser at all.
+- After talking with Greg, I think the best way to get the returned data ingested in correct formatting is to _not_ write a parser in C, but instead create a new output format for Quasar based on Postgres' COPY command. (See this [JIRA ticket](https://slamdata.atlassian.net/browse/SD-1096)). Moss seemed to agree. Not sure when work on this will start. After I get the WHERE and JOIN pushdown done, I'll circle around and implement it if no one else already has.
+- Finally, I was able to implement WHERE pushdown. A lot of thanks to the oracle_fdw guys there. I haven't added a ton of test cases, but basic usage is there.
+- Also found out we won't be able to push down LIMIT, ORDER BY, or GROUP BY as those aren't exposed to FDWs.
+- Next Steps:
+    - Test `WHERE` clauses
+    - Add `EXPLAIN` support and test cases to test pushdown
+    - Add `JOIN` support
+    - Add `text/csv;mode=postgres` to [Quasar](https://slamdata.atlassian.net/browse/SD-1096)
 
 11/3/2015:
 - Did a ton of reading on the [oracle_fdw](https://github.com/laurenz/oracle_fdw). The oracle fdw pushes down a lot of WHERE clauses and only grabs the fields needed in those clauses.

@@ -40,8 +40,17 @@ typedef struct QuasarOpt
  */
 typedef struct QuasarFdwPlanState
 {
+    /* Actual query to be executed by Quasar */
     char *query;
+
+    /* Columns that are being retrieved from Quasar */
     List *columns;
+
+    /* List of constant parameters to execute in query parameters */
+    List *params;
+
+    /* Bools representing which clauses have been fully pushed down to Quasar */
+    bool *pushdown_clauses;
 } QuasarFdwPlanState;
 
 /*

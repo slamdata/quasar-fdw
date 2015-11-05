@@ -11,6 +11,7 @@ CREATE FOREIGN TABLE ft3(id integer) SERVER quasar OPTIONS (table 'bar', table '
 CREATE FOREIGN TABLE zips(city varchar, pop integer, state char(2))
        SERVER quasar
        OPTIONS (table 'zips');
+CREATE FOREIGN TABLE zipsloc(loc numeric[2]) SERVER quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
                             b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
                             c varchar OPTIONS (map 'topObj.midObj.botObj.c'))
@@ -27,3 +28,5 @@ SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;
 SELECT * FROM nested LIMIT 1;
 /* less fields than in relation, with one in a WHERE clause */
 SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
+/* Test out array usage */
+SELECT * FROM zipsloc LIMIT 2;

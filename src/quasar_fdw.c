@@ -19,31 +19,69 @@
 
 #include "postgres.h"
 
-#include "quasar_fdw.h"
-
+#include "access/htup_details.h"
 #include "access/reloptions.h"
+#include "access/sysattr.h"
+#include "access/xact.h"
+#include "catalog/indexing.h"
+#include "catalog/pg_attribute.h"
+#include "catalog/pg_cast.h"
+#include "catalog/pg_collation.h"
+#include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
-#include "commands/copy.h"
+#include "catalog/pg_namespace.h"
+#include "catalog/pg_operator.h"
+#include "catalog/pg_proc.h"
+#include "catalog/pg_user_mapping.h"
+#include "catalog/pg_type.h"
 #include "commands/defrem.h"
-#include "executor/executor.h"
+#include "commands/explain.h"
+#include "commands/vacuum.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
-#include "lib/stringinfo.h"
+#include "libpq/md5.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
-#include "nodes/pg_list.h"
 #include "nodes/makefuncs.h"
-#include "nodes/value.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/pg_list.h"
+#include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/var.h"
+#include "parser/parse_relation.h"
+#include "parser/parsetree.h"
+#include "port.h"
 #include "postmaster/fork_process.h"
-#include "storage/fd.h"
 #include "storage/ipc.h"
+#include "storage/fd.h"
+#include "storage/lock.h"
+#include "utils/array.h"
+#include "utils/builtins.h"
+#include "utils/date.h"
+#include "utils/datetime.h"
 #include "utils/elog.h"
+#include "utils/fmgroids.h"
+#include "utils/formatting.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/resowner.h"
+#include "utils/timestamp.h"
+#include "utils/tqual.h"
+#include "utils/snapmgr.h"
+#include "utils/syscache.h"
+#include "utils/timestamp.h"
+
+#include <string.h>
+#include <stdlib.h>
 
 #include <curl/curl.h>
+
+#include "quasar_fdw.h"
 
 PG_MODULE_MAGIC;
 
@@ -102,7 +140,10 @@ static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan);
 struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt);
 void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable);
-
+char *getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params);
+List *serializePlanState(struct QuasarFdwPlanState *fdwState);
+struct QuasarFdwPlanState *deserializePlanState(List *l);
+static char *datumToString(Datum datum, Oid type);
 
 /*
  * _PG_init
@@ -184,6 +225,7 @@ quasarGetForeignRelSize(PlannerInfo *root,
 
       fdwState = palloc0(sizeof(QuasarFdwPlanState));
       baserel->fdw_private = (void *) fdwState;
+      fdwState->params = NIL;
 
       /* initialize required state in fdw_private */
 
@@ -260,7 +302,7 @@ quasarGetForeignPlan(PlannerInfo *root,
       elog(DEBUG1, "entering function %s", __func__);
 
       QuasarFdwPlanState *fdwPlan = (QuasarFdwPlanState*) baserel->fdw_private;
-      List * fdw_private = list_make2(fdwPlan->query, fdwPlan->columns);
+      List * fdw_private = serializePlanState(fdwPlan);
 
       scan_clauses = extract_actual_clauses(scan_clauses, false);
 
@@ -281,6 +323,8 @@ quasarGetForeignPlan(PlannerInfo *root,
                               NIL);       /* no private state either */
 #endif
 
+      pfree(fdwPlan);
+      baserel->fdw_private = NULL;
 }
 
 #endif
@@ -318,10 +362,9 @@ quasarBeginForeignScan(ForeignScanState *node,
       char       *url, *prefix;
       pid_t       pid;
       quasar_ipc_context ctx;
-      List *fdw_private = ((ForeignScan*)node->ss.ps.plan)->fdw_private;
-      char *query = (char*) linitial(fdw_private);
-      List *columns = (List*) lsecond(fdw_private);
-
+      struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
+      char *query = plan->query;
+      List *params = plan->params;
 
       /*
        * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
@@ -344,8 +387,6 @@ quasarBeginForeignScan(ForeignScanState *node,
       appendStringInfo(&buf, "%s/query/fs%s?q=",
                        opt->server, opt->path);
       url = buf.data;
-
-      query = (char *) lfirst(list_head(fdw_private));
 
       prefix = create_tempprefix();
       snprintf(ctx.flagfn, sizeof(ctx.flagfn), "%s.flag", prefix);
@@ -419,6 +460,9 @@ quasarBeginForeignScan(ForeignScanState *node,
           curl_slist_free_all(headers);
           curl_easy_cleanup(curl);
           curl_free(query_encoded);
+          pfree(url);
+          pfree(query);
+          list_free_deep(params);
 
           proc_exit(0);
       }
@@ -438,11 +482,6 @@ quasarBeginForeignScan(ForeignScanState *node,
           }
       }
 
-      ListCell *lc;
-      foreach(lc, columns) {
-          elog(DEBUG1, "quasar_fdw: Column list: %s", lfirst(lc));
-      }
-
       /*
        * Create CopyState from FDW options.  We always acquire all columns, so
        * as to match the expected ScanTupleSlot signature.
@@ -450,7 +489,7 @@ quasarBeginForeignScan(ForeignScanState *node,
       cstate = BeginCopyFrom(node->ss.ss_currentRelation,
                              ctx.datafn,
                              false,
-                             columns,
+                             plan->columns,
                              festate->copy_options);
 
       /*
@@ -461,6 +500,8 @@ quasarBeginForeignScan(ForeignScanState *node,
       festate->datafn = pstrdup(ctx.datafn);
 
       node->fdw_state = (void *) festate;
+
+      pfree(plan);
 }
 
 
@@ -620,6 +661,29 @@ body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 }
 
 
+/* serializePlanState
+ * serialize the Plan state in a List
+ *
+ * Notably, pushdown_clauses is not serialize because it isn't needed
+ */
+List *serializePlanState(struct QuasarFdwPlanState *fdwState) {
+    return list_make3(fdwState->query, fdwState->columns, fdwState->params);
+}
+
+/* deserializePlanState
+ * deserialize a list into a plan state
+ *
+ * Notably, pushdown_clauses is not deserialized because it isn't needed.
+ */
+struct QuasarFdwPlanState *deserializePlanState(List *l) {
+    struct QuasarFdwPlanState *state = palloc0(sizeof(struct QuasarFdwPlanState));
+    state->query = (char*) linitial(l);
+    state->columns = (List*) lsecond(l);
+    state->params = (List*) lthird(l);
+    return state;
+}
+
+
 /* getQuasarTable
  *     Retrieve information on a QuasarTable
  */
@@ -706,13 +770,16 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
 void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan)
 {
     ListCell *cell;
-    bool first_col = true;
-    int i;
+    bool first_col = true, in_quote = false;
+    int i, clause_count = -1, index;
     StringInfoData query;
+    char *where, *wherecopy, parname[10], *p;
     List *columnlist = foreignrel->reltargetlist,
         *conditions = foreignrel->baserestrictinfo,
         *used_columns = NIL;
     struct QuasarColumn *col;
+    List **params = &plan->params;
+    bool **pushdown_clauses = &plan->pushdown_clauses;
 
     elog(DEBUG1, "entering function %s", __func__);
 
@@ -757,8 +824,63 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
         appendStringInfo(&query, "'1'");
     appendStringInfo(&query, " FROM %s", quasarTable->name);
 
+
+    /* allocate enough space for pushdown_clauses */
+    if (conditions != NIL)
+    {
+        *pushdown_clauses = (bool *)palloc(sizeof(bool) * list_length(conditions));
+    }
+
+    /* append WHERE clauses */
+    first_col = true;
+    foreach(cell, conditions)
+    {
+        /* try to convert each condition to Oracle SQL */
+        where = getQuasarWhereClause(foreignrel, ((RestrictInfo *)lfirst(cell))->clause, quasarTable, params);
+        if (where != NULL) {
+            /* append new WHERE clause to query string */
+            if (first_col)
+            {
+                first_col = false;
+                appendStringInfo(&query, " WHERE %s", where);
+            }
+            else
+            {
+                appendStringInfo(&query, " AND %s", where);
+            }
+            pfree(where);
+
+            (*pushdown_clauses)[++clause_count] = true;
+        }
+        else
+            (*pushdown_clauses)[++clause_count] = false;
+    }
+
     plan->query = pstrdup(query.data);
     plan->columns = used_columns;
+
+    /* get a copy of the where clause without single quoted string literals */
+    wherecopy = query.data;
+    for (p=wherecopy; *p!='\0'; ++p)
+    {
+        if (*p == '\'')
+            in_quote = ! in_quote;
+        if (in_quote)
+            *p = ' ';
+    }
+
+    /* remove all parameters that do not actually occur in the query */
+    index = 0;
+    foreach(cell, *params)
+    {
+        ++index;
+        snprintf(parname, 10, ":p%d", index);
+        if (strstr(wherecopy, parname) == NULL)
+        {
+            /* set the element to NULL to indicate it's gone */
+            lfirst(cell) = NULL;
+        }
+    }
 
     pfree(query.data);
 }
@@ -991,4 +1113,583 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
                     (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
                     errmsg("Internal quasar_fdw error: encountered unknown node type %d.", expr->type)));
     }
+}
+
+
+/*
+ * datumToString
+ *      Convert a Datum to a string by calling the type output function.
+ *      Returns the result or NULL if it cannot be converted to Quasar SQL.
+ */
+static char
+*datumToString(Datum datum, Oid type)
+{
+    StringInfoData result;
+    regproc typoutput;
+    HeapTuple tuple;
+    char *str, *p;
+
+    /* get the type's output function */
+    tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
+    if (!HeapTupleIsValid(tuple))
+    {
+        elog(ERROR, "cache lookup failed for type %u", type);
+    }
+    typoutput = ((Form_pg_type)GETSTRUCT(tuple))->typoutput;
+    ReleaseSysCache(tuple);
+
+    /* render the constant in Quasar SQL */
+    switch (type)
+    {
+        case TEXTOID:
+        case CHAROID:
+        case BPCHAROID:
+        case VARCHAROID:
+        case NAMEOID:
+            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
+
+            /* quote string */
+            initStringInfo(&result);
+            appendStringInfo(&result, "'");
+            for (p=str; *p; ++p)
+            {
+                if (*p == '\'')
+                    appendStringInfo(&result, "'");
+                appendStringInfo(&result, "%c", *p);
+            }
+            appendStringInfo(&result, "'");
+            break;
+        case INT8OID:
+        case INT2OID:
+        case INT4OID:
+        case OIDOID:
+        case FLOAT4OID:
+        case FLOAT8OID:
+        case NUMERICOID:
+            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
+            initStringInfo(&result);
+            appendStringInfo(&result, "%s", str);
+            break;
+        case DATEOID:
+            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
+            initStringInfo(&result);
+            appendStringInfo(&result, "DATE '%s'", str);
+            break;
+        case TIMESTAMPOID:
+            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
+            initStringInfo(&result);
+            appendStringInfo(&result, "TIMESTAMP '%s'", str);
+            break;
+        /* case TIMESTAMPTZOID: */
+        case INTERVALOID:
+            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
+            initStringInfo(&result);
+            appendStringInfo(&result, "INTERVAL '%s'", str);
+            break;
+        default:
+            return NULL;
+    }
+
+    return result.data;
+}
+
+/*
+ * This macro is used by getQuasarWhereClause to identify PostgreSQL
+ * types that can be translated to Quasar SQL-2.
+ */
+#define canHandleType(x) ((x) == TEXTOID || (x) == CHAROID || (x) == BPCHAROID \
+                          || (x) == VARCHAROID || (x) == NAMEOID || (x) == INT8OID || (x) == INT2OID \
+                          || (x) == INT4OID || (x) == OIDOID || (x) == FLOAT4OID || (x) == FLOAT8OID \
+                          || (x) == NUMERICOID || (x) == DATEOID || (x) == TIMEOID || (x) == TIMESTAMPOID \
+                          || (x) == INTERVALOID || (x) == BOOLOID)
+
+/*
+ * getQuasarWhereClause
+ *      Create an Quasar SQL WHERE clause from the expression and store in in "where".
+ *      Returns NULL if that is not possible, else a palloc'ed string.
+ *      As a side effect, all Params incorporated in the WHERE clause
+ *      will be stored in paramList.
+ */
+char *
+getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params)
+{
+    char *opername, *left, *right, *arg, oprkind;
+    Const *constant;
+    OpExpr *oper;
+    ScalarArrayOpExpr *arrayoper;
+    BoolExpr *boolexpr;
+    Param *param;
+    Var *variable;
+    FuncExpr *func;
+    regproc typoutput;
+    HeapTuple tuple;
+    ListCell *cell;
+    StringInfoData result;
+    Oid leftargtype, rightargtype, schema;
+    ArrayIterator iterator;
+    Datum datum;
+    bool first_arg, isNull;
+    int index;
+
+    if (expr == NULL)
+        return NULL;
+
+    switch(expr->type)
+    {
+    case T_Const:
+        constant = (Const *)expr;
+        if (constant->constisnull)
+        {
+            /* only translate NULLs of a type Quasar can handle */
+            if (canHandleType(constant->consttype))
+            {
+                initStringInfo(&result);
+                appendStringInfo(&result, "NULL");
+            }
+            else
+                return NULL;
+        }
+        else
+        {
+            /* get a string representation of the value */
+            char *c = datumToString(constant->constvalue, constant->consttype);
+            if (c == NULL)
+                return NULL;
+            else
+            {
+                initStringInfo(&result);
+                appendStringInfo(&result, "%s", c);
+                pfree(c);
+            }
+        }
+        break;
+    case T_Param:
+        param = (Param *)expr;
+
+        if (! canHandleType(param->paramtype))
+            return NULL;
+
+        /* find the index in the parameter list */
+        index = 0;
+        foreach(cell, *params)
+        {
+            ++index;
+            if (equal(param, (Node *)lfirst(cell)))
+                break;
+        }
+        if (cell == NULL)
+        {
+            /* add the parameter to the list */
+            ++index;
+            *params = lappend(*params, param);
+        }
+
+        /* parameters will be called :p1, :p2 etc. */
+        initStringInfo(&result);
+        appendStringInfo(&result, ":p%d", index);
+
+        break;
+
+    case T_Var:
+        variable = (Var *)expr;
+
+        if (variable->varno == foreignrel->relid && variable->varlevelsup == 0)
+        {
+            /* the variable belongs to the foreign table, replace it with the name */
+
+            /* we cannot handle system columns */
+            if (variable->varattno < 1)
+                return NULL;
+
+            /*
+             * Allow boolean columns here.
+             * They will be rendered as ("COL" <> 0).
+             */
+            if (! canHandleType(variable->vartype))
+                return NULL;
+
+            /* get quasarTable column index corresponding to this column (-1 if none) */
+            index = quasarTable->ncols - 1;
+            while (index >= 0 && quasarTable->cols[index]->pgattnum != variable->varattno)
+                --index;
+
+            /* if no Quasar column corresponds, translate as NULL */
+            if (index == -1)
+            {
+                initStringInfo(&result);
+                appendStringInfo(&result, "NULL");
+                break;
+            }
+
+            initStringInfo(&result);
+            appendStringInfo(&result, "%s", quasarTable->cols[index]->name);
+
+        }
+        else
+        {
+            /* treat it like a parameter */
+
+            if (! canHandleType(variable->vartype))
+                return NULL;
+
+            /* find the index in the parameter list */
+            index = 0;
+            foreach(cell, *params)
+            {
+                ++index;
+                if (equal(variable, (Node *)lfirst(cell)))
+                    break;
+            }
+            if (cell == NULL)
+            {
+                /* add the parameter to the list */
+                ++index;
+                *params = lappend(*params, variable);
+            }
+
+            /* parameters will be called :p1, :p2 etc. */
+            initStringInfo(&result);
+            appendStringInfo(&result, ":p%d", index);
+        }
+
+        break;
+    case T_OpExpr:
+        oper = (OpExpr *)expr;
+
+        /* get operator name, kind, argument type and schema */
+        tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(oper->opno));
+        if (! HeapTupleIsValid(tuple))
+        {
+            elog(ERROR, "cache lookup failed for operator %u", oper->opno);
+        }
+        opername = pstrdup(((Form_pg_operator)GETSTRUCT(tuple))->oprname.data);
+        oprkind = ((Form_pg_operator)GETSTRUCT(tuple))->oprkind;
+        leftargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprleft;
+        rightargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprright;
+        schema = ((Form_pg_operator)GETSTRUCT(tuple))->oprnamespace;
+        ReleaseSysCache(tuple);
+
+        /* ignore operators in other than the pg_catalog schema */
+        if (schema != PG_CATALOG_NAMESPACE)
+            return NULL;
+
+        if (! canHandleType(rightargtype))
+            return NULL;
+
+        /* the operators that we can translate */
+        if (strcmp(opername, "=") == 0
+            || strcmp(opername, "<>") == 0
+            || strcmp(opername, ">") == 0
+            || strcmp(opername, "<") == 0
+            || strcmp(opername, ">=") == 0
+            || strcmp(opername, "<=") == 0
+            || strcmp(opername, "+") == 0
+            || strcmp(opername, "/") == 0
+            /* Cannot subtract DATEs in Quasar */
+            || (strcmp(opername, "-") == 0 && rightargtype != DATEOID && rightargtype != TIMESTAMPOID
+                && rightargtype != TIMESTAMPTZOID)
+            || strcmp(opername, "*") == 0
+            || strcmp(opername, "~~") == 0
+            || strcmp(opername, "!~~") == 0
+            /* || strcmp(opername, "~~*") == 0 */ /* Case Insensitive LIKE */
+            /* || strcmp(opername, "!~~*") == 0 */ /* Not Case Insensitive LIKE */
+            /* || strcmp(opername, "^") == 0 */ /* Power */
+            || strcmp(opername, "%") == 0
+            /* || strcmp(opername, "&") == 0 */ /* Bit-and */
+            /* || strcmp(opername, "|/") == 0 */ /* Square Root */
+            /* || strcmp(opername, "@") == 0 */ /* Absolute Value */
+            )
+        {
+            left = getQuasarWhereClause(foreignrel, linitial(oper->args), quasarTable, params);
+            if (left == NULL)
+            {
+                pfree(opername);
+                return NULL;
+            }
+
+            if (oprkind == 'b')
+            {
+                /* binary operator */
+                right = getQuasarWhereClause(foreignrel, lsecond(oper->args), quasarTable, params);
+                if (right == NULL)
+                {
+                    pfree(left);
+                    pfree(opername);
+                    return NULL;
+                }
+
+                initStringInfo(&result);
+                if (strcmp(opername, "~~") == 0)
+                {
+                    /* TODO Add ESCAPE args to LIKE? */
+                    appendStringInfo(&result, "(%s LIKE %s)", left, right);
+                }
+                else if (strcmp(opername, "!~~") == 0)
+                {
+                    appendStringInfo(&result, "(%s NOT LIKE %s)", left, right);
+                }
+                else
+                {
+                    /* the other operators have the same name in Quasar */
+                    appendStringInfo(&result, "(%s %s %s)", left, opername, right);
+                }
+                pfree(right);
+                pfree(left);
+            }
+            else
+            {
+                /* unary operator */
+                initStringInfo(&result);
+                /* unary + or - */
+                appendStringInfo(&result, "(%s%s)", opername, left);
+
+                pfree(left);
+            }
+        }
+        else
+        {
+            /* cannot translate this operator */
+            pfree(opername);
+            return NULL;
+        }
+
+        pfree(opername);
+        break;
+    case T_ScalarArrayOpExpr:
+        arrayoper = (ScalarArrayOpExpr *)expr;
+
+        /* get operator name, left argument type and schema */
+        tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(arrayoper->opno));
+        if (! HeapTupleIsValid(tuple))
+        {
+            elog(ERROR, "cache lookup failed for operator %u", arrayoper->opno);
+        }
+        opername = pstrdup(((Form_pg_operator)GETSTRUCT(tuple))->oprname.data);
+        leftargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprleft;
+        schema = ((Form_pg_operator)GETSTRUCT(tuple))->oprnamespace;
+        ReleaseSysCache(tuple);
+
+        /* get the type's output function */
+        tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(leftargtype));
+        if (!HeapTupleIsValid(tuple))
+        {
+            elog(ERROR, "cache lookup failed for type %u", leftargtype);
+        }
+        typoutput = ((Form_pg_type)GETSTRUCT(tuple))->typoutput;
+        ReleaseSysCache(tuple);
+
+        /* ignore operators in other than the pg_catalog schema */
+        if (schema != PG_CATALOG_NAMESPACE)
+            return NULL;
+
+        /* don't try to push down anything but IN and NOT IN expressions */
+        if ((strcmp(opername, "=") != 0 || ! arrayoper->useOr)
+            && (strcmp(opername, "<>") != 0 || arrayoper->useOr))
+            return NULL;
+
+        if (! canHandleType(leftargtype))
+            return NULL;
+
+        left = getQuasarWhereClause(foreignrel, linitial(arrayoper->args), quasarTable, params);
+        if (left == NULL)
+            return NULL;
+
+        /* only push down IN expressions with constant second (=last) argument */
+        if (((Expr *)llast(arrayoper->args))->type != T_Const)
+            return NULL;
+
+        /* begin to compose result */
+        initStringInfo(&result);
+        appendStringInfo(&result, "(%s %s [", left, arrayoper->useOr ? "IN" : "NOT IN");
+
+        /* the second (=last) argument must be a Const of ArrayType */
+        constant = (Const *)llast(arrayoper->args);
+
+        /* using NULL in place of an array or value list is valid in Quasar and PostgreSQL */
+        if (constant->constisnull)
+            appendStringInfo(&result, "NULL");
+        else
+        {
+            /* loop through the array elements */
+            iterator = array_create_iterator(DatumGetArrayTypeP(constant->constvalue), 0);
+            first_arg = true;
+            while (array_iterate(iterator, &datum, &isNull))
+            {
+                char *c;
+
+                if (isNull)
+                    c = "NULL";
+                else
+                {
+                    c = datumToString(datum, leftargtype);
+                    if (c == NULL)
+                    {
+                        array_free_iterator(iterator);
+                        return NULL;
+                    }
+                }
+
+                /* append the argument */
+                appendStringInfo(&result, "%s%s", first_arg ? "" : ", ", c);
+                first_arg = false;
+            }
+            array_free_iterator(iterator);
+
+            /* don't push down empty arrays, since the semantics for NOT x = ANY(<empty array>) differ */
+            if (first_arg)
+                return NULL;
+        }
+
+        /* two parentheses close the expression */
+        appendStringInfo(&result, "])");
+
+        break;
+    case T_DistinctExpr:        /* (x IS DISTINCT FROM y) */
+        return NULL;
+        break;
+    case T_NullIfExpr:          /* NULLIF(x, y) */
+        return NULL;
+        break;
+    case T_BoolExpr:
+        boolexpr = (BoolExpr *)expr;
+
+        arg = getQuasarWhereClause(foreignrel, linitial(boolexpr->args), quasarTable, params);
+        if (arg == NULL)
+            return NULL;
+
+        initStringInfo(&result);
+        appendStringInfo(&result, "(%s%s",
+                         boolexpr->boolop == NOT_EXPR ? "NOT " : "",
+                         arg);
+
+        for_each_cell(cell, lnext(list_head(boolexpr->args)))
+        {
+            arg = getQuasarWhereClause(foreignrel, (Expr *)lfirst(cell), quasarTable, params);
+            if (arg == NULL)
+            {
+                pfree(result.data);
+                return NULL;
+            }
+
+            appendStringInfo(&result, " %s %s",
+                             boolexpr->boolop == AND_EXPR ? "AND" : "OR",
+                             arg);
+        }
+        appendStringInfo(&result, ")");
+
+        break;
+    case T_RelabelType:
+        return getQuasarWhereClause(foreignrel, ((RelabelType *)expr)->arg, quasarTable, params);
+        break;
+    case T_CoerceToDomain:
+        return getQuasarWhereClause(foreignrel, ((CoerceToDomain *)expr)->arg, quasarTable, params);
+        break;
+    case T_CaseExpr:
+        return NULL;
+        break;
+    case T_CoalesceExpr:
+        return NULL;
+        break;
+    case T_NullTest:
+        arg = getQuasarWhereClause(foreignrel, ((NullTest *)expr)->arg, quasarTable, params);
+        if (arg == NULL)
+            return NULL;
+
+        initStringInfo(&result);
+        appendStringInfo(&result, "(%s IS %sNULL)",
+                         arg,
+                         ((NullTest *)expr)->nulltesttype == IS_NOT_NULL ? "NOT " : "");
+        break;
+    case T_FuncExpr:
+        func = (FuncExpr *)expr;
+
+        if (! canHandleType(func->funcresulttype))
+            return NULL;
+
+        /* do nothing for implicit casts */
+        if (func->funcformat == COERCE_IMPLICIT_CAST)
+            return getQuasarWhereClause(foreignrel, linitial(func->args), quasarTable, params);
+
+        /* get function name and schema */
+        tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func->funcid));
+        if (! HeapTupleIsValid(tuple))
+        {
+            elog(ERROR, "cache lookup failed for function %u", func->funcid);
+        }
+        opername = pstrdup(((Form_pg_proc)GETSTRUCT(tuple))->proname.data);
+        schema = ((Form_pg_proc)GETSTRUCT(tuple))->pronamespace;
+        ReleaseSysCache(tuple);
+
+        /* ignore functions in other than the pg_catalog schema */
+        if (schema != PG_CATALOG_NAMESPACE)
+            return NULL;
+
+        /* the "normal" functions that we can translate */
+        if (strcmp(opername, "char_length") == 0
+            || strcmp(opername, "character_length") == 0
+            || strcmp(opername, "concat") == 0
+            || strcmp(opername, "length") == 0
+            || strcmp(opername, "lower") == 0
+            || (strcmp(opername, "substr") == 0 && list_length(func->args) == 3)
+            || (strcmp(opername, "substring") == 0 && list_length(func->args) == 3)
+            || strcmp(opername, "upper") == 0
+            || strcmp(opername, "date_part") == 0
+            || strcmp(opername, "to_timestamp") == 0)
+        {
+            initStringInfo(&result);
+
+            if (strcmp(opername, "char_length") == 0 ||
+                strcmp(opername, "character_length") == 0)
+                appendStringInfo(&result, "length(");
+            else if (strcmp(opername, "substr") == 0)
+                appendStringInfo(&result, "substring(");
+            else
+                appendStringInfo(&result, "%s(", opername);
+
+            first_arg = true;
+            foreach(cell, func->args)
+            {
+                arg = getQuasarWhereClause(foreignrel, lfirst(cell), quasarTable, params);
+                if (arg == NULL)
+                {
+                    pfree(result.data);
+                    pfree(opername);
+                    return NULL;
+                }
+
+                if (first_arg)
+                {
+                    first_arg = false;
+                    appendStringInfo(&result, "%s", arg);
+                }
+                else
+                {
+                    appendStringInfo(&result, ", %s", arg);
+                }
+                pfree(arg);
+            }
+
+            appendStringInfo(&result, ")");
+        }
+        else
+        {
+            /* function that we cannot render for Quasar */
+            pfree(opername);
+            return NULL;
+        }
+
+        pfree(opername);
+        break;
+    case T_CoerceViaIO:
+        /*
+         * Quasar doesn't support CAST
+         */
+        return NULL;
+        break;
+    default:
+        /* we cannot translate this to Quasar */
+        return NULL;
+    }
+
+    return result.data;
 }
