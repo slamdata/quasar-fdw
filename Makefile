@@ -26,7 +26,7 @@ QUASAR_VERSION = $(shell cat $(QUASAR_DIR)/version.sbt | cut -d'=' -f2 | xargs)
 
 PG_CPPFLAGS = -g
 CURL_LIB = $(shell curl-config --libs)
-MY_LIBS = $(CURL_LIB)
+MY_LIBS = $(CURL_LIB) -lyajl
 SHLIB_LINK = $(MY_LIBS)
 
 ## PGXS Configuration

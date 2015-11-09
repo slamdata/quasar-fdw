@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <yajl/yajl_parse.h>
 
 #include "postgres.h"
 
@@ -99,7 +100,6 @@ extern PGDLLEXPORT void _PG_init(void);
 
 
 /* callback functions */
-#if (PG_VERSION_NUM >= 90200)
 static void quasarGetForeignRelSize(PlannerInfo *root,
                                     RelOptInfo *baserel,
                                     Oid foreigntableid);
@@ -114,9 +114,6 @@ static ForeignScan *quasarGetForeignPlan(PlannerInfo *root,
                                          ForeignPath *best_path,
                                          List *tlist,
                                          List *scan_clauses);
-#else
-static FdwPlan *quasarPlanForeignScan(Oid foreigntableid, PlannerInfo *root, RelOptInfo *baserel);
-#endif
 
 static void quasarBeginForeignScan(ForeignScanState *node,
                                       int eflags);
@@ -126,6 +123,8 @@ static TupleTableSlot *quasarIterateForeignScan(ForeignScanState *node);
 static void quasarReScanForeignScan(ForeignScanState *node);
 
 static void quasarEndForeignScan(ForeignScanState *node);
+
+static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es);
 
 
 /*
@@ -180,15 +179,14 @@ quasar_fdw_handler(PG_FUNCTION_ARGS)
       /* Required by notations: S=SELECT I=INSERT U=UPDATE D=DELETE */
 
       /* these are required */
-#if (PG_VERSION_NUM >= 90200)
       fdwroutine->GetForeignRelSize = quasarGetForeignRelSize; /* S U D */
       fdwroutine->GetForeignPaths = quasarGetForeignPaths;        /* S U D */
       fdwroutine->GetForeignPlan = quasarGetForeignPlan;          /* S U D */
-#endif
       fdwroutine->BeginForeignScan = quasarBeginForeignScan;      /* S U D */
       fdwroutine->IterateForeignScan = quasarIterateForeignScan;        /* S */
       fdwroutine->ReScanForeignScan = quasarReScanForeignScan; /* S */
       fdwroutine->EndForeignScan = quasarEndForeignScan;          /* S U D */
+      fdwroutine->ExplainForeignScan = quasarExplainForeignScan; /* E */
 
       PG_RETURN_POINTER(fdwroutine);
 }
@@ -232,6 +230,7 @@ quasarGetForeignRelSize(PlannerInfo *root,
       QuasarOpt *opt = quasar_get_options(foreigntableid);
       struct QuasarTable *qTable = getQuasarTable(foreigntableid, opt);
       createQuery(baserel, qTable, fdwState);
+      fdwState->quasarTable = qTable;
       elog(DEBUG1, "quasar_fdw: query is %s", fdwState->query);
 }
 
@@ -355,7 +354,6 @@ quasarBeginForeignScan(ForeignScanState *node,
 
       elog(DEBUG1, "entering function %s", __func__);
 
-      CopyState   cstate;
       QuasarFdwExecState *festate;
       QuasarOpt *opt;
       StringInfoData buf;
@@ -374,12 +372,6 @@ quasarBeginForeignScan(ForeignScanState *node,
 
       festate = (QuasarFdwExecState *) palloc(sizeof(QuasarFdwExecState));
 
-      festate->copy_options =
-          list_make2(
-              makeDefElem("format", (Node*) makeString("csv")),
-              makeDefElem("header", (Node*) makeInteger(1))
-          );
-
       /* Fetch options of foreign table */
       opt = quasar_get_options(RelationGetRelid(node->ss.ss_currentRelation));
 
@@ -397,7 +389,6 @@ quasarBeginForeignScan(ForeignScanState *node,
           elog(ERROR, "mkfifo failed(%d):%s", errno, ctx.flagfn);
       if (mkfifo(ctx.datafn, S_IRUSR | S_IWUSR) != 0)
           elog(ERROR, "mkfifo failed(%d):%s", errno, ctx.datafn);
-
 
 
       /*
@@ -428,7 +419,7 @@ quasarBeginForeignScan(ForeignScanState *node,
            * Set up request header list
            */
           headers = NULL;
-          headers = curl_slist_append(headers, "Accept: text/csv");
+          /* headers = curl_slist_append(headers, "Accept: application/json"); */
 
           /*
            * Encode query
@@ -461,7 +452,6 @@ quasarBeginForeignScan(ForeignScanState *node,
           curl_easy_cleanup(curl);
           curl_free(query_encoded);
           pfree(url);
-          pfree(query);
           list_free_deep(params);
 
           proc_exit(0);
@@ -482,22 +472,14 @@ quasarBeginForeignScan(ForeignScanState *node,
           }
       }
 
-      /*
-       * Create CopyState from FDW options.  We always acquire all columns, so
-       * as to match the expected ScanTupleSlot signature.
-       */
-      cstate = BeginCopyFrom(node->ss.ss_currentRelation,
-                             ctx.datafn,
-                             false,
-                             plan->columns,
-                             festate->copy_options);
-
-      /*
-       * Save state in node->fdw_state.  We must save enough information to call
-       * BeginCopyFrom() again.
-       */
-      festate->cstate = cstate;
+      festate->query = query;
       festate->datafn = pstrdup(ctx.datafn);
+      festate->datafp = AllocateFile(festate->datafn, "r");
+      festate->buffer = palloc(sizeof(char) * BUF_SIZE);
+      festate->buf_loc = BUF_SIZE;
+      festate->buf_size = BUF_SIZE;
+      festate->parse_ctx = palloc(sizeof(quasar_parse_context));
+      quasar_parse_alloc(festate->parse_ctx, plan->quasarTable);
 
       node->fdw_state = (void *) festate;
 
@@ -536,14 +518,9 @@ quasarIterateForeignScan(ForeignScanState *node)
 
     QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
     TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-    bool found;
-    ErrorContextCallback errctx;
+    long rc;
 
-    /* Set up callback to identify error line number. */
-    errctx.callback = CopyFromErrorCallback;
-    errctx.arg = (void *) festate->cstate;
-    errctx.previous = error_context_stack;
-    error_context_stack = &errctx;
+    /* TODO add error context */
 
     /*
      * The protocol for loading a virtual tuple into a slot is first
@@ -551,21 +528,40 @@ quasarIterateForeignScan(ForeignScanState *node)
      * ExecStoreVirtualTuple.  If we don't find another row in the file, we
      * just skip the last step, leaving the slot empty as required.
      *
-     * We can pass ExprContext = NULL because we read all columns from the
-     * file, so no need to evaluate default expressions.
-     *
-     * We can also pass tupleOid = NULL because we don't allow oids for
-     * foreign tables.
      */
     ExecClearTuple(slot);
-    found = NextCopyFrom(festate->cstate, NULL,
-                         slot->tts_values, slot->tts_isnull,
-                         NULL);
-    if (found)
-        ExecStoreVirtualTuple(slot);
+    quasar_parse_set_slot(festate->parse_ctx, slot);
 
-    /* Remove error callback. */
-    error_context_stack = errctx.previous;
+    while (festate->buf_loc < festate->buf_size || !feof(festate->datafp)) {
+        elog(DEBUG1, "quasar_fdw: iterate entering read loop");
+
+        /* If we have exhausted our buffer, read a new one in */
+        if (festate->buf_loc >= festate->buf_size) {
+            rc = fread(festate->buffer, 1, BUF_SIZE, festate->datafp);
+            if (rc != BUF_SIZE && ferror(festate->datafp)) {
+                elog(ERROR, "Error reading from FIFO file");
+            }
+            festate->buf_size = rc;
+            festate->buf_loc = 0;
+        }
+
+        /* Parse a row and store it if we find one */
+        if (quasar_parse(festate->parse_ctx,
+                         festate->buffer,
+                         &festate->buf_loc,
+                         festate->buf_size)) {
+            elog(DEBUG1, "Found a tuple!");
+            ExecStoreVirtualTuple(slot);
+            return slot;
+        }
+    }
+
+    /* In practice, this should always be true here */
+    if (feof(festate->datafp)) {
+        if (quasar_parse_end(festate->parse_ctx))
+            ExecStoreVirtualTuple(slot);
+        return slot;
+    }
 
     return slot;
 }
@@ -585,8 +581,10 @@ quasarEndForeignScan(ForeignScanState *node)
       QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
       /* if festate is NULL, we are in EXPLAIN; nothing to do */
       if (festate) {
-          EndCopyFrom(festate->cstate);
+          FreeFile(festate->datafp);
+          quasar_parse_free(festate->parse_ctx);
           unlink(festate->datafn);
+          pfree(festate->buffer);
       }
 }
 
@@ -599,17 +597,24 @@ quasarEndForeignScan(ForeignScanState *node)
      */
 
     elog(DEBUG1, "entering function %s", __func__);
+    elog(ERROR, "Rescan not supported");
+}
 
-    QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
 
-    EndCopyFrom(festate->cstate);
+/*
+ * quasarExplainForeignScan
+ *              Produce extra output for EXPLAIN:
+ *              the Quasar query
+ */
+static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es) {
+    struct QuasarFdwExecState *fdwState = (struct QuasarFdwExecState *)node->fdw_state;
 
-    festate->cstate = BeginCopyFrom(node->ss.ss_currentRelation,
-        festate->datafn,
-        false,
-        NIL,
-        festate->copy_options);
+    elog(DEBUG1, "Entering function %s", __func__);
 
+    elog(DEBUG1, "quasar_fdw: explain foreign table scan on %d", RelationGetRelid(node->ss.ss_currentRelation));
+
+    /* show query */
+    ExplainPropertyText("Quasar query", fdwState->query, es);
 }
 
 
@@ -650,12 +655,12 @@ header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 static size_t
 body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 {
-    elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG2, "entering function %s", __func__);
     size_t      segsize = size * nmemb;
     quasar_ipc_context *ctx = (quasar_ipc_context *) userp;
 
     fwrite(buffer, size, nmemb, ctx->datafp);
-    elog(DEBUG1, "wrote %ld bytes to curl buffer", segsize);
+    elog(DEBUG2, "wrote %ld bytes to curl buffer", segsize);
 
     return segsize;
 }
@@ -667,7 +672,7 @@ body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
  * Notably, pushdown_clauses is not serialize because it isn't needed
  */
 List *serializePlanState(struct QuasarFdwPlanState *fdwState) {
-    return list_make3(fdwState->query, fdwState->columns, fdwState->params);
+    return list_make3(fdwState->query, fdwState->quasarTable, fdwState->params);
 }
 
 /* deserializePlanState
@@ -678,7 +683,7 @@ List *serializePlanState(struct QuasarFdwPlanState *fdwState) {
 struct QuasarFdwPlanState *deserializePlanState(List *l) {
     struct QuasarFdwPlanState *state = palloc0(sizeof(struct QuasarFdwPlanState));
     state->query = (char*) linitial(l);
-    state->columns = (List*) lsecond(l);
+    state->quasarTable = (struct QuasarTable*) lsecond(l);
     state->params = (List*) lthird(l);
     return state;
 }
@@ -775,8 +780,7 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
     StringInfoData query;
     char *where, *wherecopy, parname[10], *p;
     List *columnlist = foreignrel->reltargetlist,
-        *conditions = foreignrel->baserestrictinfo,
-        *used_columns = NIL;
+        *conditions = foreignrel->baserestrictinfo;
     struct QuasarColumn *col;
     List **params = &plan->params;
     bool **pushdown_clauses = &plan->pushdown_clauses;
@@ -805,7 +809,6 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
         col = quasarTable->cols[i];
         if (col->used)
         {
-            used_columns = lappend(used_columns, makeString(col->pgname));
             if (!first_col)
             {
                 appendStringInfo(&query, ", ");
@@ -857,7 +860,6 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
     }
 
     plan->query = pstrdup(query.data);
-    plan->columns = used_columns;
 
     /* get a copy of the where clause without single quoted string literals */
     wherecopy = query.data;
