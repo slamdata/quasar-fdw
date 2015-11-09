@@ -32,4 +32,4 @@ SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
 /* Test out array usage */
 SELECT * FROM zipsloc LIMIT 2;
 /* Test out json usage */
-SELECT * FROM zipsjson LIMIT 2;
+SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;

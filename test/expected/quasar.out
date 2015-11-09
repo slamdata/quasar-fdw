@@ -65,12 +65,12 @@ SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
 
 /* Test out array usage */
 SELECT * FROM zipsloc LIMIT 2;
-ERROR:  cache lookup failed for type 3246430256
+ERROR:  Array types not supported by quasar_fdw. Use json
 /* Test out json usage */
-SELECT * FROM zipsjson LIMIT 2;
-          loc           |          locb           
-------------------------+-------------------------
- [-72.108354,42.409698] | [-72.108354, 42.409698]
- [-72.622739,42.070206] | [-72.622739, 42.070206]
+SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
+    loc0    |   loc1    |          locb           
+------------+-----------+-------------------------
+ -72.108354 | 42.409698 | [-72.108354, 42.409698]
+ -72.622739 | 42.070206 | [-72.622739, 42.070206]
 (2 rows)
 

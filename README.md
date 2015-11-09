@@ -4,6 +4,10 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 ## WIP Status
 
+11/9/2015:
+- I implemented a parser in `quasar_fdw`. It currently handles all base types (I haven't tested dates/times/intervals, but they should work), and arbitrary json. It does not support array types at the moment, but json can be a stand-in for now.
+  - The json parser I used is missing a "pause" feature to only parse a single row at a time. I believe it will be simple to patch, so I'll make a PR for that.
+
 11/4/2015:
 - I found out a way to tell the Copy command that we're only grabbing certain fields ([here](https://github.com/postgres/postgres/blob/master/src/backend/commands/copy.c#L2603)). This solves one problem I had last week without rewriting the parser. If I can leverage `AS` syntax to overcome parsing arrays, I might be able to not have to rewrite the parser at all.
 - After talking with Greg, I think the best way to get the returned data ingested in correct formatting is to _not_ write a parser in C, but instead create a new output format for Quasar based on Postgres' COPY command. (See this [JIRA ticket](https://slamdata.atlassian.net/browse/SD-1096)). Moss seemed to agree. Not sure when work on this will start. After I get the WHERE and JOIN pushdown done, I'll circle around and implement it if no one else already has.
