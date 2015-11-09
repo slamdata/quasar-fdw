@@ -44,6 +44,10 @@ struct QuasarColumn
     int pgattnum;            /* PostgreSQL attribute number */
     Oid pgtype;              /* PostgreSQL data type */
     int pgtypmod;            /* PostgreSQL type modification */
+    int arrdims;             /* PostgreSQL array dimensions */
+    int len;                 /* element length */
+    bool byval;              /* element by value */
+    char align;              /* element alignment */
     int used;                /* is the column used in the query? */
 };
 

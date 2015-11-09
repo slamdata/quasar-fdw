@@ -655,12 +655,12 @@ header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 static size_t
 body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 {
-    elog(DEBUG2, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
     size_t      segsize = size * nmemb;
     quasar_ipc_context *ctx = (quasar_ipc_context *) userp;
 
     fwrite(buffer, size, nmemb, ctx->datafp);
-    elog(DEBUG2, "wrote %ld bytes to curl buffer", segsize);
+    elog(DEBUG3, "wrote %ld bytes to curl buffer", segsize);
 
     return segsize;
 }
@@ -733,6 +733,10 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
             col->pgattnum = att_tuple->attnum;
             col->pgtype = att_tuple->atttypid;
             col->pgtypmod = att_tuple->atttypmod;
+            col->arrdims = att_tuple->attndims;
+            col->len = att_tuple->attlen;
+            col->byval = att_tuple->attbyval;
+            col->align = att_tuple->attalign;
             col->pgname = pstrdup(NameStr(att_tuple->attname));
             col->name = NULL;
 
@@ -1135,7 +1139,7 @@ static char
     tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
     if (!HeapTupleIsValid(tuple))
     {
-        elog(ERROR, "cache lookup failed for type %u", type);
+        elog(ERROR, "%s: cache lookup failed for type %u", __func__, type);
     }
     typoutput = ((Form_pg_type)GETSTRUCT(tuple))->typoutput;
     ReleaseSysCache(tuple);
@@ -1475,7 +1479,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(leftargtype));
         if (!HeapTupleIsValid(tuple))
         {
-            elog(ERROR, "cache lookup failed for type %u", leftargtype);
+            elog(ERROR, "%s cache lookup failed for type %u", __func__, leftargtype);
         }
         typoutput = ((Form_pg_type)GETSTRUCT(tuple))->typoutput;
         ReleaseSysCache(tuple);

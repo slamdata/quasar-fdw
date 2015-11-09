@@ -15,9 +15,10 @@ CREATE FOREIGN TABLE ft2(id integer) SERVER quasar OPTIONS (table 'bar');
 CREATE FOREIGN TABLE ft3(id integer) SERVER quasar OPTIONS (table 'bar', table 'baz');
 ERROR:  option "table" provided more than once
 CREATE FOREIGN TABLE zips(city varchar, pop integer, state char(2))
-       SERVER quasar
-       OPTIONS (table 'zips');
+       SERVER quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE zipsloc(loc numeric[2]) SERVER quasar OPTIONS (table 'zips');
+CREATE FOREIGN TABLE zipsjson(loc json, locb jsonb OPTIONS (map 'loc'))
+       SERVER quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
                             b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
                             c varchar OPTIONS (map 'topObj.midObj.botObj.c'))
@@ -64,3 +65,12 @@ SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
 
 /* Test out array usage */
 SELECT * FROM zipsloc LIMIT 2;
+ERROR:  cache lookup failed for type 3246430256
+/* Test out json usage */
+SELECT * FROM zipsjson LIMIT 2;
+          loc           |          locb           
+------------------------+-------------------------
+ [-72.108354,42.409698] | [-72.108354, 42.409698]
+ [-72.622739,42.070206] | [-72.622739, 42.070206]
+(2 rows)
+

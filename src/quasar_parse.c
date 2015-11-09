@@ -75,7 +75,7 @@ regproc getTypeFunction(Oid pgtype) {
     HeapTuple tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(pgtype));
     if (!HeapTupleIsValid(tuple))
     {
-        elog(ERROR, "cache lookup failed for type %u", pgtype);
+        elog(ERROR, "%s cache lookup failed for type %d", __func__, pgtype);
     }
     typinput = ((Form_pg_type)GETSTRUCT(tuple))->typinput;
     ReleaseSysCache(tuple);
@@ -91,18 +91,7 @@ static struct QuasarColumn *get_column(parser *p) {
 }
 
 static bool is_array_type(parser *p) {
-    switch(get_column(p)->pgtype) {
-    case INT2ARRAYOID:
-    case INT4ARRAYOID:
-    case TEXTARRAYOID:
-    case OIDARRAYOID:
-    case FLOAT4ARRAYOID:
-    case CSTRINGARRAYOID:
-    case ANYARRAYOID:
-        return true;
-    default:
-        return false;
-    }
+    return get_column(p)->arrdims > 0;
 }
 
 static bool is_json_type(parser *p) {
@@ -145,6 +134,9 @@ static void store_datum(parser *p, Datum dat, const char *fmt) {
     struct QuasarColumn *col = get_column(p);
 
     if (p->level == COLUMN_LEVEL) {
+        regproc typinput = getTypeFunction(col->pgtype);
+        elog(DEBUG1, "store_datum got type function %d", col->pgtype);
+
         /* If the column is set, lets put this in the tuple */
         switch (col->pgtype) {
         case BPCHAROID:
@@ -155,16 +147,18 @@ static void store_datum(parser *p, Datum dat, const char *fmt) {
         case NUMERICOID:
             /* these functions require the type modifier */
             p->slot->tts_values[p->cur_col] =
-                OidFunctionCall3(getTypeFunction(col->pgtype),
+                OidFunctionCall3(typinput,
                                  dat,
                                  ObjectIdGetDatum(InvalidOid),
                                  Int32GetDatum(col->pgtypmod));
             break;
         default:
+            elog(DEBUG1, "calling oid function %d", typinput);
             /* the others don't */
-            p->slot->tts_values[p->cur_col] =
-                OidFunctionCall1(getTypeFunction(col->pgtype), dat);
+            p->slot->tts_values[p->cur_col] = OidFunctionCall1(typinput, dat);
+            elog(DEBUG1, "%s %d", __func__, __LINE__);
         }
+        elog(DEBUG1, "store_datum stored value");
     } else if (p->level > COLUMN_LEVEL) {
         appendCommaIf(p);
         appendStringInfo(&p->structure, fmt, DatumGetCString(dat));
@@ -189,12 +183,16 @@ static void store_null(parser *p) {
 
 /* Yajl callbacks */
 static int cb_null(void * ctx) {
+    elog(DEBUG2, "parse function %s level %d", __func__, ((parser*)ctx)->level);
     store_null((parser*) ctx);
     return YAJL_OK;
 }
 
 static int cb_boolean(void * ctx, int boolean) {
+    char * s = boolean ? "true" : "false";
+    elog(DEBUG2, "parse function %s level %d: %s", __func__, ((parser*)ctx)->level, s);
     store_datum((parser*) ctx, BoolGetDatum(boolean), "%s");
+    pfree(s);
     return YAJL_OK;
 }
 
@@ -202,14 +200,20 @@ static int cb_boolean(void * ctx, int boolean) {
 static int cb_string(void * ctx,
                     const unsigned char * value,
                     size_t len) {
-    store_datum((parser*) ctx, CStringGetDatum(pnstrdup((const char *)value, len)), "\"%s\"");
+    char * s = pnstrdup((const char *)value, len);
+    elog(DEBUG2, "parse function %s level %d: %s", __func__, ((parser*)ctx)->level, s);
+    store_datum((parser*) ctx, CStringGetDatum(s), "\"%s\"");
+    pfree(s);
     return YAJL_OK;
 }
 
 static int cb_number(void * ctx,
                      const char * value,
                      size_t len) {
-    store_datum((parser*) ctx, CStringGetDatum(pnstrdup(value, len)), "%s");
+    char * s = pnstrdup((const char *)value, len);
+    elog(DEBUG2, "parse function %s level %d: %s", __func__, ((parser*)ctx)->level, s);
+    store_datum((parser*) ctx, CStringGetDatum(s), "%s");
+    pfree(s);
     return YAJL_OK;
 }
 
@@ -218,37 +222,36 @@ static int cb_map_key(void * ctx,
                       size_t stringLen) {
     parser *p = (parser*) ctx;
     size_t i;
+    char * s = pnstrdup((const char*) stringVal, stringLen);
+    elog(DEBUG2, "parse function %s level %d: %s", __func__, p->level, s);
 
     if (p->level == COLUMN_LEVEL) {
         /* Find the column */
         p->cur_col = NO_COLUMN;
         for (i = 0; i < p->table->ncols; ++i) {
-            if (strncmp((const char *)stringVal,
-                        p->table->cols[i]->pgname,
-                        stringLen) == 0) {
+            if (strcmp(s, p->table->cols[i]->pgname) == 0) {
                 p->cur_col = i;
                 break;
             }
         }
         if (p->cur_col == NO_COLUMN) {
-            elog(ERROR, "Couldnt find column for returned JSON field: %s",
-                 pnstrdup((const char *)stringVal, stringLen));
+            elog(ERROR, "Couldnt find column for returned JSON field: %s", s);
         }
     } else if (p->level > COLUMN_LEVEL) {
         if (is_json_type(p)) {
             appendCommaIf(p);
-            char *s = pnstrdup((const char *)stringVal, stringLen);
             appendStringInfo(&p->structure, "\"%s\":", s);
-            pfree(s);
         } else {
             elog(ERROR, "Got map key inside non-json type");
         }
     }
+    pfree(s);
     return YAJL_OK;
 }
 
 static int cb_start_map(void * ctx) {
     parser *p = (parser*) ctx;
+    elog(DEBUG2, "parse function %s level %d", __func__, p->level);
     if (p->level >= COLUMN_LEVEL) {
         if (is_json_type(p)) {
             appendCommaIf(p);
@@ -264,6 +267,7 @@ static int cb_start_map(void * ctx) {
 
 static int cb_end_map(void * ctx) {
     parser *p = (parser*) ctx;
+    elog(DEBUG2, "parse function %s level %d", __func__, p->level);
     if (p->level > COLUMN_LEVEL) {
         if (is_json_type(p)) {
             appendStringInfoChar(&p->structure, '}');
@@ -287,6 +291,7 @@ static int cb_end_map(void * ctx) {
 
 static int cb_start_array(void * ctx) {
     parser *p = (parser*) ctx;
+    elog(DEBUG2, "parse function %s level %d", __func__, p->level);
     if (p->level >= COLUMN_LEVEL) {
         if (is_array_type(p)) {
             if (p->level > COLUMN_LEVEL)
@@ -305,6 +310,7 @@ static int cb_start_array(void * ctx) {
 
 static int cb_end_array(void * ctx) {
     parser *p = (parser*) ctx;
+    elog(DEBUG2, "parse function %s level %d", __func__, p->level);
     if (p->level > COLUMN_LEVEL) {
         if (is_array_type(p)) {
             appendStringInfo(&p->structure, "}");
@@ -421,7 +427,7 @@ bool quasar_parse(quasar_parse_context *ctx,
 bool quasar_parse_end(quasar_parse_context *ctx) {
     elog(DEBUG1, "entering function %s", __func__);
 
-    yajl_complete_parse(ctx->handle);
+    /* yajl_complete_parse(ctx->handle); */
     return ((parser*)ctx->p)->record_complete;
 }
 

@@ -9,9 +9,10 @@ CREATE FOREIGN TABLE ft1(id integer) SERVER quasar OPTIONS (wrong 'foo');
 CREATE FOREIGN TABLE ft2(id integer) SERVER quasar OPTIONS (table 'bar');
 CREATE FOREIGN TABLE ft3(id integer) SERVER quasar OPTIONS (table 'bar', table 'baz');
 CREATE FOREIGN TABLE zips(city varchar, pop integer, state char(2))
-       SERVER quasar
-       OPTIONS (table 'zips');
+       SERVER quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE zipsloc(loc numeric[2]) SERVER quasar OPTIONS (table 'zips');
+CREATE FOREIGN TABLE zipsjson(loc json, locb jsonb OPTIONS (map 'loc'))
+       SERVER quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
                             b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
                             c varchar OPTIONS (map 'topObj.midObj.botObj.c'))
@@ -30,3 +31,5 @@ SELECT * FROM nested LIMIT 1;
 SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
 /* Test out array usage */
 SELECT * FROM zipsloc LIMIT 2;
+/* Test out json usage */
+SELECT * FROM zipsjson LIMIT 2;
