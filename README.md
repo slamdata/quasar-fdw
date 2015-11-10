@@ -4,6 +4,9 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 ## WIP Status
 
+11/10/2015:
+- I patched the json parser to have a reset feature so I didn't have to allocate every iteration. Interestingly, the parser lazy-allocates its lexer, which causes issues on the second iteration because each iteration is in a short-lived memory context. I had to force an allocation with `yajl_parse(handle, NULL, 0)` in the `BeginForeignScan` function in order to fix it.
+
 11/9/2015:
 - I implemented a parser in `quasar_fdw`. It currently handles all base types (I haven't tested dates/times/intervals, but they should work), and arbitrary json. It does not support array types at the moment, but json can be a stand-in for now.
 - The json parser I used is missing a "pause" feature to only parse a single row at a time. I believe it will be simple to patch, so I'll make a PR for that. For now, I'm doing extra allocation every iteration.

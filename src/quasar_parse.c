@@ -236,8 +236,11 @@ static int cb_map_key(void * ctx,
 
 static int cb_start_map(void * ctx) {
     elog(DEBUG2, "entering function %s", __func__);
-
     parser *p = (parser*) ctx;
+    if (p->level == TOP_LEVEL && p->record_complete) {
+        return YAJL_CANCEL;
+    }
+
     if (p->level >= COLUMN_LEVEL) {
         if (is_json_type(p)) {
             appendCommaIf(p);
@@ -271,7 +274,6 @@ static int cb_end_map(void * ctx) {
         resetStringInfo(&p->json);
     } else if (p->level == TOP_LEVEL) {
         p->record_complete = true;
-        return YAJL_CANCEL;
     }
     return YAJL_OK;
 }
@@ -356,14 +358,14 @@ void quasar_parse_alloc(quasar_parse_context *ctx, struct QuasarTable *table) {
     initStringInfo(&p->json);
     ctx->p = p;
     ctx->handle = NULL;
-    /* ctx->handle = yajl_alloc(&callbacks, &allocs, p); */
-    /* yajl_config(ctx->handle, yajl_allow_multiple_values, 1); */
-
+    ctx->handle = yajl_alloc(&callbacks, &allocs, p);
+    yajl_config(ctx->handle, yajl_allow_multiple_values, 1);
+    yajl_parse(ctx->handle, NULL, 0); /* Allocate the lexer inside yajl */
 }
 void quasar_parse_free(quasar_parse_context *ctx) {
     elog(DEBUG1, "entering function %s", __func__);
 
-    /* yajl_free(ctx->handle); */
+    yajl_free(ctx->handle);
     pfree(((parser*)ctx->p)->json.data);
     pfree(ctx->p);
 }
@@ -377,14 +379,8 @@ bool quasar_parse(quasar_parse_context *ctx,
     bool found = false;
     parser *p = (parser*) ctx->p;
     yajl_status status;
-    yajl_handle hand;
-
-    if (ctx->handle != NULL) {
-        hand = ctx->handle;
-        ctx->handle = NULL;
-    } else {
-        hand = yajl_alloc(&callbacks, &allocs, ctx->p);
-    }
+    yajl_handle hand = ctx->handle;
+    size_t bytes;
 
     while (!found && *buf_loc < buf_size) {
         /* Response is formed as many json objects
@@ -395,6 +391,8 @@ bool quasar_parse(quasar_parse_context *ctx,
         status = yajl_parse(hand,
                             (const unsigned char *)buffer + *buf_loc,
                             buf_size - *buf_loc);
+        bytes = yajl_get_bytes_consumed(hand);
+
         if (status == yajl_status_error) {
             unsigned char *errstr =
                 yajl_get_error(hand, 1,
@@ -402,20 +400,20 @@ bool quasar_parse(quasar_parse_context *ctx,
                                buf_size - *buf_loc);
             elog(ERROR, "Error parsing json: %s", errstr);
             yajl_free_error(hand, errstr); /* Never executed... */
+        } else if (status == yajl_status_client_canceled) {
+            bytes--;
+            yajl_reset(ctx->handle);
         }
+
         elog(DEBUG1, "Consumed %lu bytes of json. %s record",
-             yajl_get_bytes_consumed(hand),
+             bytes,
              p->record_complete ? "found" : "didnt find");
 
         found = p->record_complete;
-        *buf_loc += yajl_get_bytes_consumed(hand);
+        *buf_loc += bytes;
     }
     p->record_complete = false;
 
-    if (!found)                 /* Save handle to finish later */
-        ctx->handle = hand;
-    else
-        yajl_free(hand);
     return found;
 }
 
