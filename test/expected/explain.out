@@ -117,3 +117,12 @@ EXPLAIN SELECT zips.city AS city, pop, state, loc
                Quasar query: SELECT city, loc FROM zips
 (7 rows)
 
+/* query for a missing field */
+EXPLAIN SELECT missing, city FROM zips_missing LIMIT 3;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Limit  (cost=100.00..101.00 rows=1 width=64)
+   ->  Foreign Scan on zips_missing  (cost=100.00..101.00 rows=1 width=64)
+         Quasar query: SELECT city, missing FROM zips
+(3 rows)
+

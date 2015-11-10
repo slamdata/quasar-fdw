@@ -459,6 +459,7 @@ quasarIterateForeignScan(ForeignScanState *node)
 }
 
 
+
 static void
 quasarEndForeignScan(ForeignScanState *node)
 {

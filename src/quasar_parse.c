@@ -51,6 +51,7 @@ static bool is_json_type(parser *p);
 static void appendCommaIf(parser *p);
 static void store_datum(parser *p, Datum dat, const char *fmt);
 static void store_null(parser *p);
+void finalize_tuple(quasar_parse_context *ctx, TupleTableSlot *slot);
 
 /* Alloc callbacks */
 void *yajl_palloc(void *ctx, size_t sz);
@@ -393,11 +394,12 @@ bool quasar_parse(quasar_parse_context *ctx,
     yajl_handle hand = ctx->handle;
     size_t bytes;
 
-    while (!found && *buf_loc < buf_size) {
+    if (*buf_loc < buf_size) {
         /* Response is formed as many json objects
          * So we can just parse until a full one is completed
          * and pick it up where we left off next time.
-         * We do this by only parsing until '}' */
+         * We do this by only parsing until
+         * the beginning of the second object and stepping back one */
 
         status = yajl_parse(hand,
                             (const unsigned char *)buffer + *buf_loc,
@@ -410,7 +412,6 @@ bool quasar_parse(quasar_parse_context *ctx,
                                (const unsigned char *)buffer + *buf_loc,
                                buf_size - *buf_loc);
             elog(ERROR, "Error parsing json: %s", errstr);
-            yajl_free_error(hand, errstr); /* Never executed... */
         } else if (status == yajl_status_client_canceled) {
             bytes--;
             yajl_reset(ctx->handle);
@@ -422,8 +423,12 @@ bool quasar_parse(quasar_parse_context *ctx,
 
         found = p->record_complete;
         *buf_loc += bytes;
+        p->record_complete = false;
     }
-    p->record_complete = false;
+
+    if (found) {
+        finalize_tuple(ctx, ((parser*)ctx->p)->slot);
+    }
 
     return found;
 }
@@ -447,8 +452,20 @@ void quasar_parse_set_slot(quasar_parse_context *ctx, TupleTableSlot *slot) {
             slot->tts_values[i] = PointerGetDatum(NULL);
         } else {
             slot->tts_isnull[i] = false;
+            slot->tts_values[i] = -1;
         }
     }
 
     p->slot = slot;
+}
+
+void finalize_tuple(quasar_parse_context *ctx, TupleTableSlot *slot) {
+    int i;
+    parser *p = (parser*) ctx->p;
+    for (i = 0; i < p->table->ncols; ++i) {
+        if (slot->tts_values[i] == -1) {
+            slot->tts_values[i] = PointerGetDatum(NULL);
+            slot->tts_isnull[i] = true;
+        }
+    }
 }

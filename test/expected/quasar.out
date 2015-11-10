@@ -93,3 +93,12 @@ SELECT zips.city AS city, pop, state, loc
  AGAWAM | 15338 | MA    | [-72.622739,42.070206]
 (3 rows)
 
+/* query for a missing field */
+SELECT missing, city FROM zips_missing LIMIT 3;
+ missing |   city    
+---------+-----------
+         | BARRE
+         | AGAWAM
+         | BLANDFORD
+(3 rows)
+

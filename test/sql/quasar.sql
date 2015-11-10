@@ -23,3 +23,5 @@ SELECT * FROM zips WHERE pop > 1000 AND pop + pop <= 10000 LIMIT 3;
 SELECT zips.city AS city, pop, state, loc
        FROM zips JOIN zipsjson ON zips.city = zipsjson.city
        LIMIT 3;
+/* query for a missing field */
+SELECT missing, city FROM zips_missing LIMIT 3;
