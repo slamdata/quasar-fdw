@@ -47,7 +47,12 @@ SELECT city,pop FROM zips WHERE pop % 2 = 1 LIMIT 3;
 
 /* Test out array usage */
 SELECT * FROM zipsloc LIMIT 2;
-ERROR:  Array types not supported by quasar_fdw. Use json
+          loc           
+------------------------
+ {-72.108354,42.409698}
+ {-72.622739,42.070206}
+(2 rows)
+
 /* Test out json usage */
 SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
     loc0    |   loc1    |          locb           

@@ -47,6 +47,8 @@ struct QuasarColumn
     Oid pgtype;              /* PostgreSQL data type */
     int pgtypmod;            /* PostgreSQL type modification */
     int arrdims;             /* PostgreSQL array dimensions */
+    FmgrInfo typinput;        /* Input function for pg type */
+    Oid typioparam;          /* Argument for input function */
     /* int len;                 /\* element length *\/ */
     /* bool byval;              /\* element by value *\/ */
     /* char align;              /\* element alignment *\/ */

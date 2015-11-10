@@ -11,6 +11,7 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
   - add support for missing fields in quasar, set to NULL in returned tuple
   - remove non-unix compatible stuff (FIFO files)
   - split out a bunch of new test cases into readable chunks
+  - fix the input function calling to support array types
 
 11/9/2015:
 - I implemented a parser in `quasar_fdw`. It currently handles all base types (I haven't tested dates/times/intervals, but they should work), and arbitrary json. It does not support array types at the moment, but json can be a stand-in for now.

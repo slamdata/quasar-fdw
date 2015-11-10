@@ -145,6 +145,7 @@ List *serializePlanState(struct QuasarFdwPlanState *fdwState);
 struct QuasarFdwPlanState *deserializePlanState(List *l);
 static char *datumToString(Datum datum, Oid type);
 
+
 /*
  * _PG_init
  *      Library load-time initalization.
@@ -657,9 +658,6 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
             col->pgtype = att_tuple->atttypid;
             col->pgtypmod = att_tuple->atttypmod;
             col->arrdims = att_tuple->attndims;
-            /* col->len = att_tuple->attlen; */
-            /* col->byval = att_tuple->attbyval; */
-            /* col->align = att_tuple->attalign; */
             col->pgname = pstrdup(NameStr(att_tuple->attname));
             col->name = NULL;
 
@@ -685,6 +683,16 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
     }
 
     heap_close(rel, NoLock);
+
+    for (i=0; i<table->ncols; ++i) {
+        struct QuasarColumn *col = table->cols[i];
+        Oid in_func_oid;
+        elog(DEBUG2, "Getting type input info: %s %d", col->pgname, col->pgtype);
+        getTypeInputInfo(col->pgtype, &in_func_oid, &col->typioparam);
+        elog(DEBUG2, "Getting fmgr info: %s %d %d", col->pgname, in_func_oid, col->typioparam);
+        fmgr_info(in_func_oid, &col->typinput);
+        elog(DEBUG2, "Got fmgr info! %s", col->pgname);
+    }
 
     return table;
 }
