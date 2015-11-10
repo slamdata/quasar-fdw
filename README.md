@@ -6,7 +6,15 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 11/9/2015:
 - I implemented a parser in `quasar_fdw`. It currently handles all base types (I haven't tested dates/times/intervals, but they should work), and arbitrary json. It does not support array types at the moment, but json can be a stand-in for now.
-  - The json parser I used is missing a "pause" feature to only parse a single row at a time. I believe it will be simple to patch, so I'll make a PR for that.
+- The json parser I used is missing a "pause" feature to only parse a single row at a time. I believe it will be simple to patch, so I'll make a PR for that. For now, I'm doing extra allocation every iteration.
+- I also got EXPLAIN working so I can test pushdown.
+- Next Steps:
+    - Add Date/time/interval test cases with data parsing and WHERE pushdown
+    - Implement JOIN pushdown
+    - Add param support
+    - Add array datatype support
+    - Replace forked `easy_curl` with `curl_multi`
+    - Do yajl pause feature
 
 11/4/2015:
 - I found out a way to tell the Copy command that we're only grabbing certain fields ([here](https://github.com/postgres/postgres/blob/master/src/backend/commands/copy.c#L2603)). This solves one problem I had last week without rewriting the parser. If I can leverage `AS` syntax to overcome parsing arrays, I might be able to not have to rewrite the parser at all.
