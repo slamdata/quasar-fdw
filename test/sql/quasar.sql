@@ -1,13 +1,4 @@
-/* CREATE SERVER options checks */
-CREATE SERVER quasar0 FOREIGN DATA WRAPPER quasar_fdw ;
-CREATE SERVER quasar1 FOREIGN DATA WRAPPER quasar_fdw OPTIONS (wrong 'foo');
-CREATE SERVER quasar2 FOREIGN DATA WRAPPER quasar_fdw OPTIONS (server 'http://localhost:8080', path '/local/quasar', server 'http://localhost:8080');
 CREATE SERVER quasar FOREIGN DATA WRAPPER quasar_fdw OPTIONS (server 'http://localhost:8080', path '/local/quasar');
-/* CREATE TABLE options checks */
-CREATE FOREIGN TABLE ft0(id integer) SERVER quasar;
-CREATE FOREIGN TABLE ft1(id integer) SERVER quasar OPTIONS (wrong 'foo');
-CREATE FOREIGN TABLE ft2(id integer) SERVER quasar OPTIONS (table 'bar');
-CREATE FOREIGN TABLE ft3(id integer) SERVER quasar OPTIONS (table 'bar', table 'baz');
 CREATE FOREIGN TABLE zips(city varchar, pop integer, state char(2))
        SERVER quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE zipsloc(loc numeric[2]) SERVER quasar OPTIONS (table 'zips');
@@ -29,7 +20,16 @@ SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;
 SELECT * FROM nested LIMIT 1;
 /* less fields than in relation, with one in a WHERE clause */
 SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
+SELECT city,pop FROM zips WHERE pop % 2 = 1 LIMIT 3;
 /* Test out array usage */
 SELECT * FROM zipsloc LIMIT 2;
 /* Test out json usage */
 SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
+/* Pushdown tests using EXPLAIN */
+EXPLAIN SELECT * FROM zips;
+/* Pushdown some where clauses */
+EXPLAIN SELECT city FROM zips WHERE "state" = 'CO';
+EXPLAIN SELECT * FROM zips WHERE "state" LIKE 'A%';
+EXPLAIN SELECT * FROM zips WHERE "city" !~~ 'B%';
+EXPLAIN SELECT * FROM zips WHERE pop > 1000 AND pop <= 10000;
+EXPLAIN SELECT * FROM zips WHERE pop % 2 = 1;

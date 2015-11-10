@@ -23,6 +23,8 @@
 #include "nodes/relation.h"
 #include "utils/rel.h"
 
+#include "yajl/yajl_parse.h"
+
 #define BUF_SIZE 65536
 
 /*
@@ -45,9 +47,9 @@ struct QuasarColumn
     Oid pgtype;              /* PostgreSQL data type */
     int pgtypmod;            /* PostgreSQL type modification */
     int arrdims;             /* PostgreSQL array dimensions */
-    int len;                 /* element length */
-    bool byval;              /* element by value */
-    char align;              /* element alignment */
+    /* int len;                 /\* element length *\/ */
+    /* bool byval;              /\* element by value *\/ */
+    /* char align;              /\* element alignment *\/ */
     int used;                /* is the column used in the query? */
 };
 
@@ -81,6 +83,7 @@ typedef struct QuasarFdwPlanState
 
 typedef struct quasar_parse_context
 {
+    yajl_handle handle;
     void *p;
 } quasar_parse_context;
 

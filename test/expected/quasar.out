@@ -1,19 +1,4 @@
-/* CREATE SERVER options checks */
-CREATE SERVER quasar0 FOREIGN DATA WRAPPER quasar_fdw ;
-CREATE SERVER quasar1 FOREIGN DATA WRAPPER quasar_fdw OPTIONS (wrong 'foo');
-ERROR:  invalid option "wrong"
-HINT:  Valid options in this context are: server, path
-CREATE SERVER quasar2 FOREIGN DATA WRAPPER quasar_fdw OPTIONS (server 'http://localhost:8080', path '/local/quasar', server 'http://localhost:8080');
-ERROR:  option "server" provided more than once
 CREATE SERVER quasar FOREIGN DATA WRAPPER quasar_fdw OPTIONS (server 'http://localhost:8080', path '/local/quasar');
-/* CREATE TABLE options checks */
-CREATE FOREIGN TABLE ft0(id integer) SERVER quasar;
-CREATE FOREIGN TABLE ft1(id integer) SERVER quasar OPTIONS (wrong 'foo');
-ERROR:  invalid option "wrong"
-HINT:  Valid options in this context are: table
-CREATE FOREIGN TABLE ft2(id integer) SERVER quasar OPTIONS (table 'bar');
-CREATE FOREIGN TABLE ft3(id integer) SERVER quasar OPTIONS (table 'bar', table 'baz');
-ERROR:  option "table" provided more than once
 CREATE FOREIGN TABLE zips(city varchar, pop integer, state char(2))
        SERVER quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE zipsloc(loc numeric[2]) SERVER quasar OPTIONS (table 'zips');
@@ -63,6 +48,14 @@ SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
  ARVADA
 (1 row)
 
+SELECT city,pop FROM zips WHERE pop % 2 = 1 LIMIT 3;
+     city     |  pop  
+--------------+-------
+ BELCHERTOWN  | 10579
+ CUSHMAN      | 36963
+ CHESTERFIELD |   177
+(3 rows)
+
 /* Test out array usage */
 SELECT * FROM zipsloc LIMIT 2;
 ERROR:  Array types not supported by quasar_fdw. Use json
@@ -73,4 +66,53 @@ SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
  -72.108354 | 42.409698 | [-72.108354, 42.409698]
  -72.622739 | 42.070206 | [-72.622739, 42.070206]
 (2 rows)
+
+/* Pushdown tests using EXPLAIN */
+EXPLAIN SELECT * FROM zips;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
+   Quasar query: SELECT city, pop, state FROM zips
+(2 rows)
+
+/* Pushdown some where clauses */
+EXPLAIN SELECT city FROM zips WHERE "state" = 'CO';
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=32)
+   Filter: (state = 'CO'::bpchar)
+   Quasar query: SELECT city, state FROM zips WHERE (state = 'CO')
+(3 rows)
+
+EXPLAIN SELECT * FROM zips WHERE "state" LIKE 'A%';
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
+   Filter: (state ~~ 'A%'::text)
+   Quasar query: SELECT city, pop, state FROM zips WHERE (state LIKE 'A%')
+(3 rows)
+
+EXPLAIN SELECT * FROM zips WHERE "city" !~~ 'B%';
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
+   Filter: ((city)::text !~~ 'B%'::text)
+   Quasar query: SELECT city, pop, state FROM zips WHERE (city NOT LIKE 'B%')
+(3 rows)
+
+EXPLAIN SELECT * FROM zips WHERE pop > 1000 AND pop <= 10000;
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
+   Filter: ((pop > 1000) AND (pop <= 10000))
+   Quasar query: SELECT city, pop, state FROM zips WHERE (pop > 1000) AND (pop <= 10000)
+(3 rows)
+
+EXPLAIN SELECT * FROM zips WHERE pop % 2 = 1;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
+   Filter: ((pop % 2) = 1)
+   Quasar query: SELECT city, pop, state FROM zips WHERE ((pop % 2) = 1)
+(3 rows)
 

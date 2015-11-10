@@ -121,9 +121,10 @@ static void appendCommaIf(parser *p) {
 static void store_datum(parser *p, Datum dat, const char *fmt) {
     struct QuasarColumn *col = get_column(p);
 
+    elog(DEBUG1, "store_datum: level %d, %s", p->level, DatumGetCString(dat));
+
     if (p->level == COLUMN_LEVEL) {
         regproc typinput = getTypeFunction(col->pgtype);
-        elog(DEBUG1, "store_datum got type function %d", col->pgtype);
 
         /* If the column is set, lets put this in the tuple */
         switch (col->pgtype) {
@@ -141,13 +142,10 @@ static void store_datum(parser *p, Datum dat, const char *fmt) {
                                  Int32GetDatum(col->pgtypmod));
             break;
         default:
-            elog(DEBUG1, "calling oid function %d", typinput);
             /* the others don't */
             p->slot->tts_values[p->cur_col] = OidFunctionCall1(typinput, dat);
-            elog(DEBUG1, "%s %d", __func__, __LINE__);
         }
-        elog(DEBUG1, "store_datum stored value");
-    } else if (p->level > COLUMN_LEVEL) {
+    } else if (p->level > COLUMN_LEVEL && is_json_type(p)) {
         appendCommaIf(p);
         appendStringInfo(&p->json, fmt, DatumGetCString(dat));
     }
@@ -171,11 +169,13 @@ static void store_null(parser *p) {
 
 /* Yajl callbacks */
 static int cb_null(void * ctx) {
+    elog(DEBUG2, "entering function %s", __func__);
     store_null((parser*) ctx);
     return YAJL_OK;
 }
 
 static int cb_boolean(void * ctx, int boolean) {
+    elog(DEBUG2, "entering function %s", __func__);
     store_datum((parser*) ctx, BoolGetDatum(boolean), "%s");
     return YAJL_OK;
 }
@@ -184,6 +184,7 @@ static int cb_boolean(void * ctx, int boolean) {
 static int cb_string(void * ctx,
                     const unsigned char * value,
                     size_t len) {
+    elog(DEBUG2, "entering function %s", __func__);
     char * s = pnstrdup((const char *)value, len);
     store_datum((parser*) ctx, CStringGetDatum(s), "\"%s\"");
     pfree(s);
@@ -193,6 +194,7 @@ static int cb_string(void * ctx,
 static int cb_number(void * ctx,
                      const char * value,
                      size_t len) {
+    elog(DEBUG2, "entering function %s", __func__);
     char * s = pnstrdup(value, len);
     store_datum((parser*) ctx, CStringGetDatum(s), "%s");
     pfree(s);
@@ -202,6 +204,8 @@ static int cb_number(void * ctx,
 static int cb_map_key(void * ctx,
                       const unsigned char * stringVal,
                       size_t stringLen) {
+    elog(DEBUG2, "entering function %s", __func__);
+
     parser *p = (parser*) ctx;
     size_t i;
     char * s = pnstrdup((const char*) stringVal, stringLen);
@@ -231,6 +235,8 @@ static int cb_map_key(void * ctx,
 }
 
 static int cb_start_map(void * ctx) {
+    elog(DEBUG2, "entering function %s", __func__);
+
     parser *p = (parser*) ctx;
     if (p->level >= COLUMN_LEVEL) {
         if (is_json_type(p)) {
@@ -246,6 +252,8 @@ static int cb_start_map(void * ctx) {
 
 
 static int cb_end_map(void * ctx) {
+    elog(DEBUG2, "entering function %s", __func__);
+
     parser *p = (parser*) ctx;
     if (p->level > COLUMN_LEVEL) {
         if (is_json_type(p)) {
@@ -347,6 +355,7 @@ void quasar_parse_alloc(quasar_parse_context *ctx, struct QuasarTable *table) {
     p->record_complete = false;
     initStringInfo(&p->json);
     ctx->p = p;
+    ctx->handle = NULL;
     /* ctx->handle = yajl_alloc(&callbacks, &allocs, p); */
     /* yajl_config(ctx->handle, yajl_allow_multiple_values, 1); */
 
@@ -368,7 +377,14 @@ bool quasar_parse(quasar_parse_context *ctx,
     bool found = false;
     parser *p = (parser*) ctx->p;
     yajl_status status;
-    yajl_handle hand = yajl_alloc(&callbacks, &allocs, ctx->p);
+    yajl_handle hand;
+
+    if (ctx->handle != NULL) {
+        hand = ctx->handle;
+        ctx->handle = NULL;
+    } else {
+        hand = yajl_alloc(&callbacks, &allocs, ctx->p);
+    }
 
     while (!found && *buf_loc < buf_size) {
         /* Response is formed as many json objects
@@ -391,11 +407,15 @@ bool quasar_parse(quasar_parse_context *ctx,
              yajl_get_bytes_consumed(hand),
              p->record_complete ? "found" : "didnt find");
 
-        *buf_loc += yajl_get_bytes_consumed(hand);
         found = p->record_complete;
+        *buf_loc += yajl_get_bytes_consumed(hand);
     }
     p->record_complete = false;
-    yajl_free(hand);
+
+    if (!found)                 /* Save handle to finish later */
+        ctx->handle = hand;
+    else
+        yajl_free(hand);
     return found;
 }
 

@@ -607,14 +607,14 @@ quasarEndForeignScan(ForeignScanState *node)
  *              the Quasar query
  */
 static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es) {
-    struct QuasarFdwExecState *fdwState = (struct QuasarFdwExecState *)node->fdw_state;
+    struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
 
     elog(DEBUG1, "Entering function %s", __func__);
 
     elog(DEBUG1, "quasar_fdw: explain foreign table scan on %d", RelationGetRelid(node->ss.ss_currentRelation));
 
     /* show query */
-    ExplainPropertyText("Quasar query", fdwState->query, es);
+    ExplainPropertyText("Quasar query", plan->query, es);
 }
 
 
@@ -734,9 +734,9 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
             col->pgtype = att_tuple->atttypid;
             col->pgtypmod = att_tuple->atttypmod;
             col->arrdims = att_tuple->attndims;
-            col->len = att_tuple->attlen;
-            col->byval = att_tuple->attbyval;
-            col->align = att_tuple->attalign;
+            /* col->len = att_tuple->attlen; */
+            /* col->byval = att_tuple->attbyval; */
+            /* col->align = att_tuple->attalign; */
             col->pgname = pstrdup(NameStr(att_tuple->attname));
             col->name = NULL;
 
