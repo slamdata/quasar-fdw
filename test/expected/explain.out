@@ -1,9 +1,9 @@
 CREATE SERVER e_quasar FOREIGN DATA WRAPPER quasar_fdw OPTIONS (server 'http://localhost:8080', path '/local/quasar');
-CREATE FOREIGN TABLE e_zips(city varchar, pop integer, state char(2))
+CREATE FOREIGN TABLE e_zips(_id varchar, city varchar, pop integer, state char(2))
        SERVER e_quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE e_zipsloc(loc numeric[2])
        SERVER e_quasar OPTIONS (table 'zips');
-CREATE FOREIGN TABLE e_zipsjson(loc json, locb jsonb OPTIONS (map 'loc'))
+CREATE FOREIGN TABLE e_zipsjson(_id varchar, loc json, locb jsonb OPTIONS (map 'loc'))
        SERVER e_quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE e_nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
                               b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
@@ -14,9 +14,9 @@ CREATE FOREIGN TABLE e_nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
 EXPLAIN SELECT * FROM e_zips LIMIT 3;
                              QUERY PLAN                              
 ---------------------------------------------------------------------
- Limit  (cost=100.00..101.00 rows=1 width=48)
-   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=48)
-         Quasar query: SELECT city, pop, state FROM zips
+ Limit  (cost=100.00..101.00 rows=1 width=80)
+   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=80)
+         Quasar query: SELECT _id, city, pop, state FROM zips
 (3 rows)
 
 /* Select less fields than exist */
@@ -30,12 +30,12 @@ EXPLAIN SELECT city FROM e_zips LIMIT 1;
 
 /* Basic WHERE clause */
 EXPLAIN SELECT * FROM e_zips WHERE "state" = 'CO' LIMIT 2;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
- Limit  (cost=100.00..101.00 rows=1 width=48)
-   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=48)
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Limit  (cost=100.00..101.00 rows=1 width=80)
+   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=80)
          Filter: (state = 'CO'::bpchar)
-         Quasar query: SELECT city, pop, state FROM zips WHERE (state = 'CO')
+         Quasar query: SELECT _id, city, pop, state FROM zips WHERE (state = 'CO')
 (4 rows)
 
 /* Nested selection */
@@ -86,30 +86,43 @@ EXPLAIN SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM e_zipsjson LIMIT 2;
 
 /* Pushdown regex operators */
 EXPLAIN SELECT * FROM e_zips WHERE "state" LIKE 'A%' LIMIT 3;
-                                   QUERY PLAN                                    
----------------------------------------------------------------------------------
- Limit  (cost=100.00..101.00 rows=1 width=48)
-   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=48)
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Limit  (cost=100.00..101.00 rows=1 width=80)
+   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=80)
          Filter: (state ~~ 'A%'::text)
-         Quasar query: SELECT city, pop, state FROM zips WHERE (state LIKE 'A%')
+         Quasar query: SELECT _id, city, pop, state FROM zips WHERE (state LIKE 'A%')
 (4 rows)
 
 EXPLAIN SELECT * FROM e_zips WHERE "city" !~~ 'B%' LIMIT 3;
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
- Limit  (cost=100.00..101.00 rows=1 width=48)
-   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=48)
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Limit  (cost=100.00..101.00 rows=1 width=80)
+   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=80)
          Filter: ((city)::text !~~ 'B%'::text)
-         Quasar query: SELECT city, pop, state FROM zips WHERE (city NOT LIKE 'B%')
+         Quasar query: SELECT _id, city, pop, state FROM zips WHERE (city NOT LIKE 'B%')
 (4 rows)
 
 /* pushdown math operators */
 EXPLAIN SELECT * FROM e_zips WHERE pop > 1000 AND pop + pop <= 10000 LIMIT 3;
-                                              QUERY PLAN                                               
--------------------------------------------------------------------------------------------------------
- Limit  (cost=100.00..101.00 rows=1 width=48)
-   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=48)
+                                                 QUERY PLAN                                                 
+------------------------------------------------------------------------------------------------------------
+ Limit  (cost=100.00..101.00 rows=1 width=80)
+   ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=80)
          Filter: ((pop > 1000) AND ((pop + pop) <= 10000))
-         Quasar query: SELECT city, pop, state FROM zips WHERE (pop > 1000) AND ((pop + pop) <= 10000)
+         Quasar query: SELECT _id, city, pop, state FROM zips WHERE (pop > 1000) AND ((pop + pop) <= 10000)
 (4 rows)
+
+/* join zips and zipsjson */
+EXPLAIN SELECT city,pop,state,loc FROM e_zips JOIN e_zipsjson ON e_zips._id = e_zipsjson._id LIMIT 3;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Limit  (cost=200.00..202.01 rows=1 width=80)
+   ->  Nested Loop  (cost=200.00..202.01 rows=1 width=80)
+         Join Filter: ((e_zips._id)::text = (e_zipsjson._id)::text)
+         ->  Foreign Scan on e_zips  (cost=100.00..101.00 rows=1 width=80)
+               Quasar query: SELECT _id, city, pop, state FROM zips
+         ->  Foreign Scan on e_zipsjson  (cost=100.00..101.00 rows=1 width=64)
+               Quasar query: SELECT _id, loc FROM zips
+(7 rows)
 
