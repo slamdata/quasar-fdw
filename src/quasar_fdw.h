@@ -93,29 +93,16 @@ typedef struct quasar_parse_context
  */
 typedef struct QuasarFdwExecState
 {
-    char  *datafn;
-    FILE  *datafp;
-    char  *query;
-    char  *buffer;
+    char * buffer;
     size_t buf_loc;
     size_t buf_size;
     quasar_parse_context *parse_ctx;
 } QuasarFdwExecState;
 
-
-/*
- * forked processes communicate via FIFO, which is described
- * in this struct. Some experiments tell that it should be
- * a bad idead to re-open these FIFO; we prepare two files
- * as one for synchronizing flag, the other for data transfer.
- */
-typedef struct quasar_ipc_context
-{
-    char        datafn[MAXPGPATH];
-    FILE       *datafp;
-    char        flagfn[MAXPGPATH];
-    FILE       *flagfp;
-} quasar_ipc_context;
+typedef struct quasar_curl_context {
+    int status;
+    StringInfoData buffer;
+} quasar_curl_context;
 
 /* quasar_options.c headers */
 extern Datum quasar_fdw_validator(PG_FUNCTION_ARGS);

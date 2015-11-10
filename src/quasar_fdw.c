@@ -354,130 +354,59 @@ quasarBeginForeignScan(ForeignScanState *node,
 
       elog(DEBUG1, "entering function %s", __func__);
 
-      QuasarFdwExecState *festate;
-      QuasarOpt *opt;
-      StringInfoData buf;
-      char       *url, *prefix;
-      pid_t       pid;
-      quasar_ipc_context ctx;
-      struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
-      char *query = plan->query;
-      List *params = plan->params;
-
       /*
        * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
        */
       if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
           return;
 
+      QuasarFdwExecState *festate;
+      QuasarOpt *opt;
+      StringInfoData buf;
+      char       *url, *query_encoded;
+      quasar_curl_context ctx;
+      struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
+      int sc;
+      CURL *curl = curl_easy_init();
+
       festate = (QuasarFdwExecState *) palloc(sizeof(QuasarFdwExecState));
 
       /* Fetch options of foreign table */
       opt = quasar_get_options(RelationGetRelid(node->ss.ss_currentRelation));
 
+      /* Make the url */
       initStringInfo(&buf);
-      appendStringInfo(&buf, "%s/query/fs%s?q=",
-                       opt->server, opt->path);
+      query_encoded = curl_easy_escape(curl, plan->query, 0);
+      appendStringInfo(&buf, "%s/query/fs%s?q=%s",
+                       opt->server, opt->path, query_encoded);
+      curl_free(query_encoded);
       url = buf.data;
 
-      prefix = create_tempprefix();
-      snprintf(ctx.flagfn, sizeof(ctx.flagfn), "%s.flag", prefix);
-      snprintf(ctx.datafn, sizeof(ctx.datafn), "%s.data", prefix);
-      pfree(prefix);
+      /* Set up CURL instance. */
+      curl_easy_setopt(curl, CURLOPT_URL, url);
+      curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+      curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
+      curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_handler);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 
-      if (mkfifo(ctx.flagfn, S_IRUSR | S_IWUSR) != 0)
-          elog(ERROR, "mkfifo failed(%d):%s", errno, ctx.flagfn);
-      if (mkfifo(ctx.datafn, S_IRUSR | S_IWUSR) != 0)
-          elog(ERROR, "mkfifo failed(%d):%s", errno, ctx.datafn);
-
-
-      /*
-       * Fork to maximize parallelism of input from HTTP and output to SQL.
-       * The spawned child process cheats by on_exit_rest() to die immediately.
-       */
-      pid = fork_process();
-      if (pid == 0)           /* child */
+      elog(DEBUG1, "curling %s", url);
+      sc = curl_easy_perform(curl);
+      curl_easy_cleanup(curl);
+      if (sc != 0)
       {
-          struct curl_slist *headers;
-          CURL       *curl;
-          int         sc;
-          StringInfoData urlbuf;
-          char *query_encoded;
-
-          MyProcPid = getpid();   /* reset MyProcPid */
-
-          curl = curl_easy_init();
-
-          /*
-           * The exit callback routines clean up
-           * unnecessary resources holded the parent process.
-           * The child dies silently when finishing its job.
-           */
-          on_exit_reset();
-
-          /*
-           * Set up request header list
-           */
-          headers = NULL;
-          /* headers = curl_slist_append(headers, "Accept: application/json"); */
-
-          /*
-           * Encode query
-           */
-          query_encoded = curl_easy_escape(curl, query, 0);
-          initStringInfo(&urlbuf);
-          appendStringInfo(&urlbuf, "%s%s", url, query_encoded);
-
-          /*
-           * Set up CURL instance.
-           */
-          curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-          curl_easy_setopt(curl, CURLOPT_URL, urlbuf.data);
-          curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-          curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
-          curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
-          curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_handler);
-          curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
-
-          elog(DEBUG1, "curling %s", urlbuf.data);
-          sc = curl_easy_perform(curl);
-          if (ctx.datafp)
-              FreeFile(ctx.datafp);
-          if (sc != 0)
-          {
-              elog(NOTICE, "%s:curl_easy_perform = %d", url, sc);
-              unlink(ctx.datafn);
-          }
-          curl_slist_free_all(headers);
-          curl_easy_cleanup(curl);
-          curl_free(query_encoded);
-          pfree(url);
-          list_free_deep(params);
-
-          proc_exit(0);
+          elog(ERROR, "curl %s failed: %d", url, sc);
       }
-      elog(DEBUG1, "child pid = %d", pid);
+      pfree(url);
+      list_free_deep(plan->params);
 
-      {
-          int     status;
-          FILE   *fp;
-
-          fp = AllocateFile(ctx.flagfn, PG_BINARY_R);
-          read(fileno(fp), &status, sizeof(int));
-          FreeFile(fp);
-          unlink(ctx.flagfn);
-          if (status != 200)
-          {
-              elog(ERROR, "bad input from API. Status code: %d", status);
-          }
+      if (ctx.status != 200) {
+          elog(ERROR, "bad output from Quasar. Status code: %d", ctx.status);
       }
 
-      festate->query = query;
-      festate->datafn = pstrdup(ctx.datafn);
-      festate->datafp = AllocateFile(festate->datafn, "r");
-      festate->buffer = palloc(sizeof(char) * BUF_SIZE);
-      festate->buf_loc = BUF_SIZE;
-      festate->buf_size = BUF_SIZE;
+      festate->buffer = ctx.buffer.data;
+      festate->buf_loc = 0;
+      festate->buf_size = ctx.buffer.len;
       festate->parse_ctx = palloc(sizeof(quasar_parse_context));
       quasar_parse_alloc(festate->parse_ctx, plan->quasarTable);
 
@@ -518,7 +447,6 @@ quasarIterateForeignScan(ForeignScanState *node)
 
     QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
     TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-    long rc;
 
     /* TODO add error context */
 
@@ -532,19 +460,7 @@ quasarIterateForeignScan(ForeignScanState *node)
     ExecClearTuple(slot);
     quasar_parse_set_slot(festate->parse_ctx, slot);
 
-    while (festate->buf_loc < festate->buf_size || !feof(festate->datafp)) {
-        elog(DEBUG1, "quasar_fdw: iterate entering read loop");
-
-        /* If we have exhausted our buffer, read a new one in */
-        if (festate->buf_loc >= festate->buf_size) {
-            rc = fread(festate->buffer, 1, BUF_SIZE, festate->datafp);
-            if (rc != BUF_SIZE && ferror(festate->datafp)) {
-                elog(ERROR, "Error reading from FIFO file");
-            }
-            festate->buf_size = rc;
-            festate->buf_loc = 0;
-        }
-
+    if (festate->buf_loc < festate->buf_size) {
         /* Parse a row and store it if we find one */
         if (quasar_parse(festate->parse_ctx,
                          festate->buffer,
@@ -552,15 +468,7 @@ quasarIterateForeignScan(ForeignScanState *node)
                          festate->buf_size)) {
             elog(DEBUG1, "Found a tuple!");
             ExecStoreVirtualTuple(slot);
-            return slot;
         }
-    }
-
-    /* In practice, this should always be true here */
-    if (feof(festate->datafp)) {
-        if (quasar_parse_end(festate->parse_ctx))
-            ExecStoreVirtualTuple(slot);
-        return slot;
     }
 
     return slot;
@@ -581,10 +489,9 @@ quasarEndForeignScan(ForeignScanState *node)
       QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
       /* if festate is NULL, we are in EXPLAIN; nothing to do */
       if (festate) {
-          FreeFile(festate->datafp);
           quasar_parse_free(festate->parse_ctx);
-          unlink(festate->datafn);
           pfree(festate->buffer);
+          pfree(festate);
       }
 }
 
@@ -628,7 +535,7 @@ header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
     elog(DEBUG1, "entering function %s", __func__);
     const char *HTTP_1_1 = "HTTP/1.1";
     size_t      segsize = size * nmemb;
-    quasar_ipc_context *ctx = (quasar_ipc_context *) userp;
+    quasar_curl_context *ctx = (quasar_curl_context *) userp;
 
     if (strncmp(buffer, HTTP_1_1, strlen(HTTP_1_1)) == 0)
     {
@@ -636,17 +543,11 @@ header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 
         status = atoi((char *) buffer + strlen(HTTP_1_1) + 1);
         elog(DEBUG1, "curl response status %d", status);
-        ctx->flagfp = AllocateFile(ctx->flagfn, PG_BINARY_W);
-        write(fileno(ctx->flagfp), &status, sizeof(int));
-        FreeFile(ctx->flagfp);
-        if (status != 200)
-        {
-            ctx->datafp = NULL;
-            /* interrupt */
-            return 0;
+        ctx->status = status;
+
+        if (status == 200) {     /* if success */
+            initStringInfo(&ctx->buffer);
         }
-        /* iif success */
-        ctx->datafp = AllocateFile(ctx->datafn, PG_BINARY_W);
     }
 
     return segsize;
@@ -657,9 +558,11 @@ body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 {
     elog(DEBUG3, "entering function %s", __func__);
     size_t      segsize = size * nmemb;
-    quasar_ipc_context *ctx = (quasar_ipc_context *) userp;
+    quasar_curl_context *ctx = (quasar_curl_context *) userp;
 
-    fwrite(buffer, size, nmemb, ctx->datafp);
+    if (ctx->status == 200) {
+        appendBinaryStringInfo(&ctx->buffer, buffer, segsize);
+    }
     elog(DEBUG3, "wrote %ld bytes to curl buffer", segsize);
 
     return segsize;
