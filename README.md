@@ -6,6 +6,11 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 11/10/2015:
 - I patched the json parser to have a reset feature so I didn't have to allocate every iteration. Interestingly, the parser lazy-allocates its lexer, which causes issues on the second iteration because each iteration is in a short-lived memory context. I had to force an allocation with `yajl_parse(handle, NULL, 0)` in the `BeginForeignScan` function in order to fix it.
+- Various fixes this morning:
+  - add support for rescans (needed for non-pushdown joins)
+  - add support for missing fields in quasar, set to NULL in returned tuple
+  - remove non-unix compatible stuff (FIFO files)
+  - split out a bunch of new test cases into readable chunks
 
 11/9/2015:
 - I implemented a parser in `quasar_fdw`. It currently handles all base types (I haven't tested dates/times/intervals, but they should work), and arbitrary json. It does not support array types at the moment, but json can be a stand-in for now.
