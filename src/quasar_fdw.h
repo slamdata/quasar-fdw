@@ -93,10 +93,13 @@ typedef struct quasar_parse_context
  */
 typedef struct QuasarFdwExecState
 {
+    /* for rescans */
+    char * url;
+    /* for saving the buffer of raw curl data */
     char * buffer;
     size_t buf_loc;
     size_t buf_size;
-    quasar_parse_context *parse_ctx;
+    quasar_parse_context *parse_ctx; /* for parsing the data */
 } QuasarFdwExecState;
 
 typedef struct quasar_curl_context {
@@ -116,6 +119,7 @@ extern char *create_tempprefix(void);
 
 void quasar_parse_alloc(quasar_parse_context *ctx, struct QuasarTable *table);
 void quasar_parse_free(quasar_parse_context *ctx);
+void quasar_parse_reset(quasar_parse_context *ctx);
 bool quasar_parse(quasar_parse_context *ctx, const char *buffer, size_t *buf_loc, size_t buf_size);
 bool quasar_parse_end(quasar_parse_context *ctx);
 void quasar_parse_set_slot(quasar_parse_context *ctx, TupleTableSlot *slot);

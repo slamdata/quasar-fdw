@@ -370,6 +370,17 @@ void quasar_parse_free(quasar_parse_context *ctx) {
     pfree(ctx->p);
 }
 
+void quasar_parse_reset(quasar_parse_context *ctx) {
+    elog(DEBUG1, "entering function %s", __func__);
+
+    parser *p = (parser*) ctx->p;
+    p->cur_col = NO_COLUMN;
+    p->level = TOP_LEVEL;
+    p->record_complete = false;
+    resetStringInfo(&p->json);
+    yajl_reset(ctx->handle);
+}
+
 bool quasar_parse(quasar_parse_context *ctx,
                   const char *buffer,
                   size_t *buf_loc,

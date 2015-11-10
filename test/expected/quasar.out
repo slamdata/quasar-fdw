@@ -86,4 +86,10 @@ SELECT * FROM zips WHERE pop > 1000 AND pop + pop <= 10000 LIMIT 3;
 SELECT zips.city AS city, pop, state, loc
        FROM zips JOIN zipsjson ON zips.city = zipsjson.city
        LIMIT 3;
-ERROR:  Rescan not supported
+  city  |  pop  | state |          loc           
+--------+-------+-------+------------------------
+ BARRE  |  4546 | MA    | [-72.108354,42.409698]
+ BARRE  |  4546 | MA    | [-72.493619,44.194522]
+ AGAWAM | 15338 | MA    | [-72.622739,42.070206]
+(3 rows)
+

@@ -128,8 +128,9 @@ static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es);
 
 
 /*
- * Curl callback functions
+ * Curl functions
  */
+void execute_curl(struct QuasarFdwExecState *festate);
 static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf);
 static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 
@@ -363,56 +364,39 @@ quasarBeginForeignScan(ForeignScanState *node,
       QuasarFdwExecState *festate;
       QuasarOpt *opt;
       StringInfoData buf;
-      char       *url, *query_encoded;
-      quasar_curl_context ctx;
+      char       *query_encoded;
       struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
-      int sc;
       CURL *curl = curl_easy_init();
 
-      festate = (QuasarFdwExecState *) palloc(sizeof(QuasarFdwExecState));
+      festate = (QuasarFdwExecState *) palloc0(sizeof(QuasarFdwExecState));
+      festate->parse_ctx = palloc0(sizeof(quasar_parse_context));
+      quasar_parse_alloc(festate->parse_ctx, plan->quasarTable);
 
       /* Fetch options of foreign table */
       opt = quasar_get_options(RelationGetRelid(node->ss.ss_currentRelation));
 
+      /* Encode query */
+      query_encoded = curl_easy_escape(curl, plan->query, 0);
+      elog(DEBUG1, "encoding query %s -> %s", plan->query, query_encoded);
+      pfree(plan->query);
+      curl_easy_cleanup(curl);
+
       /* Make the url */
       initStringInfo(&buf);
-      query_encoded = curl_easy_escape(curl, plan->query, 0);
       appendStringInfo(&buf, "%s/query/fs%s?q=%s",
                        opt->server, opt->path, query_encoded);
+      /* TODO put params in query */
+      festate->url = buf.data;
+
+      /* cleanup after making url */
       curl_free(query_encoded);
-      url = buf.data;
-
-      /* Set up CURL instance. */
-      curl_easy_setopt(curl, CURLOPT_URL, url);
-      curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-      curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
-      curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
-      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_handler);
-      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
-
-      elog(DEBUG1, "curling %s", url);
-      sc = curl_easy_perform(curl);
-      curl_easy_cleanup(curl);
-      if (sc != 0)
-      {
-          elog(ERROR, "curl %s failed: %d", url, sc);
-      }
-      pfree(url);
       list_free_deep(plan->params);
+      pfree(plan);
 
-      if (ctx.status != 200) {
-          elog(ERROR, "bad output from Quasar. Status code: %d", ctx.status);
-      }
-
-      festate->buffer = ctx.buffer.data;
-      festate->buf_loc = 0;
-      festate->buf_size = ctx.buffer.len;
-      festate->parse_ctx = palloc(sizeof(quasar_parse_context));
-      quasar_parse_alloc(festate->parse_ctx, plan->quasarTable);
+      /* Execute the curl */
+      execute_curl(festate);
 
       node->fdw_state = (void *) festate;
-
-      pfree(plan);
 }
 
 
@@ -490,7 +474,9 @@ quasarEndForeignScan(ForeignScanState *node)
       /* if festate is NULL, we are in EXPLAIN; nothing to do */
       if (festate) {
           quasar_parse_free(festate->parse_ctx);
+          pfree(festate->parse_ctx);
           pfree(festate->buffer);
+          pfree(festate->url);
           pfree(festate);
       }
 }
@@ -504,7 +490,9 @@ quasarEndForeignScan(ForeignScanState *node)
      */
 
     elog(DEBUG1, "entering function %s", __func__);
-    elog(ERROR, "Rescan not supported");
+    QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
+
+    execute_curl(festate);
 }
 
 
@@ -524,6 +512,37 @@ static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es) {
     ExplainPropertyText("Quasar query", plan->query, es);
 }
 
+void
+execute_curl(struct QuasarFdwExecState *festate) {
+    quasar_curl_context ctx;
+    int sc;
+    CURL *curl = curl_easy_init();
+
+    /* Set up CURL instance. */
+    curl_easy_setopt(curl, CURLOPT_URL, festate->url);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_handler);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+
+    elog(DEBUG1, "curling %s", festate->url);
+    sc = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    if (sc != 0)
+    {
+        elog(ERROR, "curl %s failed: %d", festate->url, sc);
+    }
+
+    if (ctx.status != 200) {
+        elog(ERROR, "bad output from Quasar: %s. Status code: %d", festate->url, ctx.status);
+    }
+
+    festate->buffer = ctx.buffer.data;
+    festate->buf_loc = 0;
+    festate->buf_size = ctx.buffer.len;
+    quasar_parse_reset(festate->parse_ctx);
+}
 
 /*
  * Curl callback functions
