@@ -67,52 +67,29 @@ SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
  -72.622739 | 42.070206 | [-72.622739, 42.070206]
 (2 rows)
 
-/* Pushdown tests using EXPLAIN */
-EXPLAIN SELECT * FROM zips;
-                         QUERY PLAN                          
--------------------------------------------------------------
- Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
-   Quasar query: SELECT city, pop, state FROM zips
-(2 rows)
-
-/* Pushdown some where clauses */
-EXPLAIN SELECT city FROM zips WHERE "state" = 'CO';
-                            QUERY PLAN                             
--------------------------------------------------------------------
- Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=32)
-   Filter: (state = 'CO'::bpchar)
-   Quasar query: SELECT city, state FROM zips WHERE (state = 'CO')
+/* Pushdown regex operators */
+SELECT * FROM zips WHERE "state" LIKE 'A%' LIMIT 3;
+    city    |  pop  | state 
+------------+-------+-------
+ ADAMSVILLE | 10616 | AL
+ ACMAR      |  6055 | AL
+ ADGER      |  3205 | AL
 (3 rows)
 
-EXPLAIN SELECT * FROM zips WHERE "state" LIKE 'A%';
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
- Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
-   Filter: (state ~~ 'A%'::text)
-   Quasar query: SELECT city, pop, state FROM zips WHERE (state LIKE 'A%')
+SELECT * FROM zips WHERE "city" !~~ 'B%' LIMIT 3;
+  city   |  pop  | state 
+---------+-------+-------
+ AGAWAM  | 15338 | MA
+ CUSHMAN | 36963 | MA
+ CHESTER |  1688 | MA
 (3 rows)
 
-EXPLAIN SELECT * FROM zips WHERE "city" !~~ 'B%';
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
- Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
-   Filter: ((city)::text !~~ 'B%'::text)
-   Quasar query: SELECT city, pop, state FROM zips WHERE (city NOT LIKE 'B%')
-(3 rows)
-
-EXPLAIN SELECT * FROM zips WHERE pop > 1000 AND pop <= 10000;
-                                       QUERY PLAN                                        
------------------------------------------------------------------------------------------
- Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
-   Filter: ((pop > 1000) AND (pop <= 10000))
-   Quasar query: SELECT city, pop, state FROM zips WHERE (pop > 1000) AND (pop <= 10000)
-(3 rows)
-
-EXPLAIN SELECT * FROM zips WHERE pop % 2 = 1;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
- Foreign Scan on zips  (cost=100.00..101.00 rows=1 width=48)
-   Filter: ((pop % 2) = 1)
-   Quasar query: SELECT city, pop, state FROM zips WHERE ((pop % 2) = 1)
+/* pushdown math operators */
+SELECT * FROM e_zips WHERE pop > 1000 AND pop + pop <= 10000 LIMIT 3;
+   city    | pop  | state 
+-----------+------+-------
+ BARRE     | 4546 | MA
+ BLANDFORD | 1240 | MA
+ BRIMFIELD | 3706 | MA
 (3 rows)
 

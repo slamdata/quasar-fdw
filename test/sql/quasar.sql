@@ -25,11 +25,8 @@ SELECT city,pop FROM zips WHERE pop % 2 = 1 LIMIT 3;
 SELECT * FROM zipsloc LIMIT 2;
 /* Test out json usage */
 SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
-/* Pushdown tests using EXPLAIN */
-EXPLAIN SELECT * FROM zips;
-/* Pushdown some where clauses */
-EXPLAIN SELECT city FROM zips WHERE "state" = 'CO';
-EXPLAIN SELECT * FROM zips WHERE "state" LIKE 'A%';
-EXPLAIN SELECT * FROM zips WHERE "city" !~~ 'B%';
-EXPLAIN SELECT * FROM zips WHERE pop > 1000 AND pop <= 10000;
-EXPLAIN SELECT * FROM zips WHERE pop % 2 = 1;
+/* Pushdown regex operators */
+SELECT * FROM zips WHERE "state" LIKE 'A%' LIMIT 3;
+SELECT * FROM zips WHERE "city" !~~ 'B%' LIMIT 3;
+/* pushdown math operators */
+SELECT * FROM e_zips WHERE pop > 1000 AND pop + pop <= 10000 LIMIT 3;
