@@ -314,14 +314,14 @@ quasarGetForeignPlan(PlannerInfo *root,
                               scan_clauses,
                               baserel->relid,
                               NIL,  /* no expressions to evaluate */
-                              fdw_private);       /* no private state either */
+                              fdw_private);
 #else
       return make_foreignscan(tlist,
                               scan_clauses,
                               baserel->relid,
                               NIL,  /* no expressions to evaluate */
-                              fdw_private,  /* no private state either */
-                              NIL);       /* no private state either */
+                              fdw_private,
+                              NIL);
 #endif
 
       pfree(fdwPlan);
@@ -386,7 +386,6 @@ quasarBeginForeignScan(ForeignScanState *node,
       initStringInfo(&buf);
       appendStringInfo(&buf, "%s/query/fs%s?q=%s",
                        opt->server, opt->path, query_encoded);
-      /* TODO put params in query */
       festate->url = buf.data;
 
       /* cleanup after making url */
