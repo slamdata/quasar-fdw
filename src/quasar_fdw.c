@@ -130,7 +130,7 @@ static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es);
 /*
  * Curl functions
  */
-void execute_curl(struct QuasarFdwExecState *festate);
+void execute_curl(CURL *curl, struct QuasarFdwExecState *festate);
 static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf);
 static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 
@@ -304,28 +304,48 @@ quasarGetForeignPlan(PlannerInfo *root,
 
       QuasarFdwPlanState *fdwPlan = (QuasarFdwPlanState*) baserel->fdw_private;
       List * fdw_private = serializePlanState(fdwPlan);
+      List *keep_clauses = NIL;
+      ListCell *cell1, *cell2;
+      int i;
+      List *params = fdwPlan->params;
 
-      scan_clauses = extract_actual_clauses(scan_clauses, false);
+      /* keep only those clauses that are not handled by Quasar */
+      foreach(cell1, scan_clauses)
+      {
+          i = 0;
+          foreach(cell2, baserel->baserestrictinfo)
+          {
+              if (equal(lfirst(cell1), lfirst(cell2)) && ! fdwPlan->pushdown_clauses[i])
+              {
+                  keep_clauses = lcons(lfirst(cell1), keep_clauses);
+                  break;
+              }
+              ++i;
+          }
+      }
 
+      keep_clauses = extract_actual_clauses(keep_clauses, false);
 
-      /* Create the ForeignScan node */
-#if(PG_VERSION_NUM < 90500)
-      return make_foreignscan(tlist,
-                              scan_clauses,
-                              baserel->relid,
-                              NIL,  /* no expressions to evaluate */
-                              fdw_private);
-#else
-      return make_foreignscan(tlist,
-                              scan_clauses,
-                              baserel->relid,
-                              NIL,  /* no expressions to evaluate */
-                              fdw_private,
-                              NIL);
-#endif
 
       pfree(fdwPlan);
       baserel->fdw_private = NULL;
+
+      /* Create the ForeignScan node */
+#if(PG_VERSION_NUM < 90500)
+      elog(DEBUG1, "make_foreignscan %d", baserel->relid);
+      return make_foreignscan(tlist,
+                              keep_clauses,
+                              baserel->relid,
+                              params,
+                              fdw_private);
+#else
+      return make_foreignscan(tlist,
+                              keep_clauses,
+                              baserel->relid,
+                              params,
+                              fdw_private,
+                              NIL);
+#endif
 }
 
 #endif
@@ -362,10 +382,16 @@ quasarBeginForeignScan(ForeignScanState *node,
       if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
           return;
 
+      ForeignScan *fsplan = (ForeignScan *)node->ss.ps.plan;
       QuasarFdwExecState *festate;
       QuasarOpt *opt;
       StringInfoData buf;
       char       *query_encoded;
+      ExprContext *econtext;
+      MemoryContext oldcontext;
+      List *exec_params;
+      ListCell *cell;
+      int index;
       struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
       CURL *curl = curl_easy_init();
 
@@ -380,21 +406,73 @@ quasarBeginForeignScan(ForeignScanState *node,
       query_encoded = curl_easy_escape(curl, plan->query, 0);
       elog(DEBUG1, "encoding query %s -> %s", plan->query, query_encoded);
       pfree(plan->query);
-      curl_easy_cleanup(curl);
 
       /* Make the url */
       initStringInfo(&buf);
       appendStringInfo(&buf, "%s/query/fs%s?q=%s",
                        opt->server, opt->path, query_encoded);
+      curl_free(query_encoded);
+
+      /* Execute any exec params and include in the query as quasar params */
+      econtext = node->ss.ps.ps_ExprContext;
+      /* switch to short lived memory context */
+      oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+      index = 0;
+      exec_params = (List *)ExecInitExpr((Expr *)fsplan->fdw_exprs,
+                                         (PlanState *)node);
+      foreach(cell, exec_params) {
+          ExprState *expr = (ExprState *)lfirst(cell);
+          bool is_null;
+
+          /* count, but skip deleted entries */
+          ++index;
+          if (expr == NULL)
+              continue;
+
+          /* Evaluate the expression */
+          Datum datum = ExecEvalExpr((ExprState *)expr, econtext, &is_null, NULL);
+
+          /* Check for null */
+          if (is_null) {
+              appendStringInfo(&buf, "&p%d=null", index);
+          } else {
+              Oid type;
+              regproc typoutput;
+              bool typ_isvarlena;
+              FmgrInfo typoutput_info;
+              char *value, *value_encoded;
+
+              /* Get type of expression */
+              type = exprType((Node *)(expr->expr));
+              /* Get output function reference */
+              getTypeOutputInfo(type, &typoutput, &typ_isvarlena);
+              /* Convert output function reference to FmgrInfo */
+              fmgr_info(typoutput, &typoutput_info);
+              /* Call output function on eval'ed expression */
+              value = OutputFunctionCall(&typoutput_info, datum);
+
+              /* Escape the value for putting in a query string */
+              value_encoded = curl_easy_escape(curl, value, 0);
+
+              /* Insert into the query string */
+              appendStringInfo(&buf, "&p%d=%s", index, value_encoded);
+
+              curl_free(value_encoded); /* Cleanup of malloc'd memory. */
+              /* We don't have to clean up palloc'd memory
+                 (thats why we went into short-lived memory) */
+          }
+      }
+      /* reset memory context */
+      MemoryContextSwitchTo(oldcontext);
+
       festate->url = buf.data;
 
       /* cleanup after making url */
-      curl_free(query_encoded);
-      list_free_deep(plan->params);
       pfree(plan);
 
       /* Execute the curl */
-      execute_curl(festate);
+      execute_curl(curl, festate);
+      curl_easy_cleanup(curl);
 
       node->fdw_state = (void *) festate;
 }
@@ -427,7 +505,7 @@ quasarIterateForeignScan(ForeignScanState *node)
        * (just as you would need to do in the case of a data type mismatch).
        */
 
-    elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
     TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
@@ -450,7 +528,6 @@ quasarIterateForeignScan(ForeignScanState *node)
                          festate->buffer,
                          &festate->buf_loc,
                          festate->buf_size)) {
-            elog(DEBUG1, "Found a tuple!");
             ExecStoreVirtualTuple(slot);
         }
     }
@@ -493,7 +570,9 @@ quasarEndForeignScan(ForeignScanState *node)
     elog(DEBUG1, "entering function %s", __func__);
     QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
 
-    execute_curl(festate);
+    CURL *curl = curl_easy_init();
+    execute_curl(curl, festate);
+    curl_easy_cleanup(curl);
 }
 
 
@@ -514,10 +593,9 @@ static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es) {
 }
 
 void
-execute_curl(struct QuasarFdwExecState *festate) {
+execute_curl(CURL *curl, struct QuasarFdwExecState *festate) {
     quasar_curl_context ctx;
     int sc;
-    CURL *curl = curl_easy_init();
 
     /* Set up CURL instance. */
     curl_easy_setopt(curl, CURLOPT_URL, festate->url);
@@ -529,13 +607,14 @@ execute_curl(struct QuasarFdwExecState *festate) {
 
     elog(DEBUG1, "curling %s", festate->url);
     sc = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
     if (sc != 0)
     {
+        curl_easy_cleanup(curl); /* Cleanup before exception */
         elog(ERROR, "curl %s failed: %d", festate->url, sc);
     }
 
     if (ctx.status != 200) {
+        curl_easy_cleanup(curl); /* Cleanup before exception */
         elog(ERROR, "bad output from Quasar: %s. Status code: %d", festate->url, ctx.status);
     }
 
@@ -595,7 +674,24 @@ body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
  * Notably, pushdown_clauses is not serialize because it isn't needed
  */
 List *serializePlanState(struct QuasarFdwPlanState *fdwState) {
-    return list_make3(fdwState->query, fdwState->quasarTable, fdwState->params);
+    int i;
+    List *l = list_make1(makeString(fdwState->query));
+
+    l = lappend(l, makeString(fdwState->quasarTable->name));
+    l = lappend(l, makeString(fdwState->quasarTable->pgname));
+    l = lappend(l, makeInteger(fdwState->quasarTable->ncols));
+    for (i=0; i<fdwState->quasarTable->ncols; ++i) {
+        struct QuasarColumn *col = fdwState->quasarTable->cols[i];
+        l = lappend(l, makeString(col->name));
+        l = lappend(l, makeString(col->pgname));
+        l = lappend(l, makeInteger(col->pgattnum));
+        l = lappend(l, makeInteger(col->pgtype));
+        l = lappend(l, makeInteger(col->pgtypmod));
+        l = lappend(l, makeInteger(col->arrdims));
+        l = lappend(l, makeInteger(col->used));
+    }
+
+    return l;
 }
 
 /* deserializePlanState
@@ -604,10 +700,57 @@ List *serializePlanState(struct QuasarFdwPlanState *fdwState) {
  * Notably, pushdown_clauses is not deserialized because it isn't needed.
  */
 struct QuasarFdwPlanState *deserializePlanState(List *l) {
+    ListCell *lc = list_head(l);
+    int i;
+
     struct QuasarFdwPlanState *state = palloc0(sizeof(struct QuasarFdwPlanState));
-    state->query = (char*) linitial(l);
-    state->quasarTable = (struct QuasarTable*) lsecond(l);
-    state->params = (List*) lthird(l);
+    state->quasarTable = palloc0(sizeof(struct QuasarTable));
+
+    state->query = ((Value*)lfirst(lc))->val.str;
+    lc = lnext(lc);
+
+    state->quasarTable->name = ((Value*)lfirst(lc))->val.str;
+    lc = lnext(lc);
+
+    state->quasarTable->pgname = ((Value*)lfirst(lc))->val.str;
+    lc = lnext(lc);
+
+    state->quasarTable->ncols = ((Value*)lfirst(lc))->val.ival;
+    lc = lnext(lc);
+
+    state->quasarTable->cols = palloc0(state->quasarTable->ncols *
+                                       sizeof(struct QuasarColumn *));
+    for (i = 0; i < state->quasarTable->ncols; i++) {
+        struct QuasarColumn *col = palloc0(sizeof(struct QuasarColumn));
+        state->quasarTable->cols[i] = col;
+
+        col->name = ((Value*)lfirst(lc))->val.str;
+        lc = lnext(lc);
+
+        col->pgname = ((Value*)lfirst(lc))->val.str;
+        lc = lnext(lc);
+
+        col->pgattnum = ((Value*)lfirst(lc))->val.ival;
+        lc = lnext(lc);
+
+        col->pgtype = (Oid) ((Value*)lfirst(lc))->val.ival;
+        lc = lnext(lc);
+
+        col->pgtypmod = ((Value*)lfirst(lc))->val.ival;
+        lc = lnext(lc);
+
+        col->arrdims = ((Value*)lfirst(lc))->val.ival;
+        lc = lnext(lc);
+
+        col->used = ((Value*)lfirst(lc))->val.ival;
+        lc = lnext(lc);
+
+        /* Fill out typinput and typioparam fields */
+        Oid in_func_oid;
+        getTypeInputInfo(col->pgtype, &in_func_oid, &col->typioparam);
+        fmgr_info(in_func_oid, &col->typinput);
+    }
+
     return state;
 }
 
@@ -682,16 +825,6 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
     }
 
     heap_close(rel, NoLock);
-
-    for (i=0; i<table->ncols; ++i) {
-        struct QuasarColumn *col = table->cols[i];
-        Oid in_func_oid;
-        elog(DEBUG2, "Getting type input info: %s %d", col->pgname, col->pgtype);
-        getTypeInputInfo(col->pgtype, &in_func_oid, &col->typioparam);
-        elog(DEBUG2, "Getting fmgr info: %s %d %d", col->pgname, in_func_oid, col->typioparam);
-        fmgr_info(in_func_oid, &col->typinput);
-        elog(DEBUG2, "Got fmgr info! %s", col->pgname);
-    }
 
     return table;
 }
@@ -839,18 +972,30 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
     switch(expr->type)
     {
         case T_RestrictInfo:
+            elog(DEBUG2, "getUsedColumns: T_RestrictInfo");
             getUsedColumns(((RestrictInfo *)expr)->clause, quasarTable);
             break;
         case T_TargetEntry:
+            elog(DEBUG2, "getUsedColumns: T_TargetEntry");
             getUsedColumns(((TargetEntry *)expr)->expr, quasarTable);
             break;
         case T_Const:
+            elog(DEBUG2, "getUsedColumns: T_Const");
+            break;
         case T_Param:
+            elog(DEBUG2, "getUsedColumns: T_Param");
+            break;
         case T_CaseTestExpr:
+            elog(DEBUG2, "getUsedColumns: T_CaseTestExpr");
+            break;
         case T_CoerceToDomainValue:
+            elog(DEBUG2, "getUsedColumns: T_CoerceToDomainValue");
+            break;
         case T_CurrentOfExpr:
+            elog(DEBUG2, "getUsedColumns: T_CurrentOfExpr");
             break;
         case T_Var:
+            elog(DEBUG2, "getUsedColumns: T_Var");
             variable = (Var *)expr;
 
             /* ignore system columns */
@@ -875,6 +1020,7 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
             }
             break;
         case T_Aggref:
+            elog(DEBUG2, "getUsedColumns: T_Aggref");
             foreach(cell, ((Aggref *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
@@ -889,12 +1035,14 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
             }
             break;
         case T_WindowFunc:
+            elog(DEBUG2, "getUsedColumns: T_WindowFunc");
             foreach(cell, ((WindowFunc *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_ArrayRef:
+            elog(DEBUG2, "getUsedColumns: T_ArrayRef");
             foreach(cell, ((ArrayRef *)expr)->refupperindexpr)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
@@ -907,73 +1055,89 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
             getUsedColumns(((ArrayRef *)expr)->refassgnexpr, quasarTable);
             break;
         case T_FuncExpr:
+            elog(DEBUG2, "getUsedColumns: T_FuncExpr");
             foreach(cell, ((FuncExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_OpExpr:
+            elog(DEBUG2, "getUsedColumns: T_OpExpr");
             foreach(cell, ((OpExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_DistinctExpr:
+            elog(DEBUG2, "getUsedColumns: T_DistinctExpr");
             foreach(cell, ((DistinctExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_NullIfExpr:
+            elog(DEBUG2, "getUsedColumns: T_NullIfExpr");
             foreach(cell, ((NullIfExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_ScalarArrayOpExpr:
+            elog(DEBUG2, "getUsedColumns: T_ScalaArrayOpExpr");
             foreach(cell, ((ScalarArrayOpExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_BoolExpr:
+            elog(DEBUG2, "getUsedColumns: T_BoolExpr");
             foreach(cell, ((BoolExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_SubPlan:
+            elog(DEBUG2, "getUsedColumns: T_SubPlan");
             foreach(cell, ((SubPlan *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_AlternativeSubPlan:
+            elog(DEBUG2, "getUsedColumns: T_AlternativeSubPlan");
             /* examine only first alternative */
             getUsedColumns((Expr *)linitial(((AlternativeSubPlan *)expr)->subplans), quasarTable);
             break;
         case T_NamedArgExpr:
+            elog(DEBUG2, "getUsedColumns: T_NamedArgExpr");
             getUsedColumns(((NamedArgExpr *)expr)->arg, quasarTable);
             break;
         case T_FieldSelect:
+            elog(DEBUG2, "getUsedColumns: T_FieldSelect");
             getUsedColumns(((FieldSelect *)expr)->arg, quasarTable);
             break;
         case T_RelabelType:
+            elog(DEBUG2, "getUsedColumns: T_RelabelType");
             getUsedColumns(((RelabelType *)expr)->arg, quasarTable);
             break;
         case T_CoerceViaIO:
+            elog(DEBUG2, "getUsedColumns: T_CoerceViaIO");
             getUsedColumns(((CoerceViaIO *)expr)->arg, quasarTable);
             break;
         case T_ArrayCoerceExpr:
+            elog(DEBUG2, "getUsedColumns: T_ArrayCoerceExpr");
             getUsedColumns(((ArrayCoerceExpr *)expr)->arg, quasarTable);
             break;
         case T_ConvertRowtypeExpr:
+            elog(DEBUG2, "getUsedColumns: T_ConvertRowtypeExpr");
             getUsedColumns(((ConvertRowtypeExpr *)expr)->arg, quasarTable);
             break;
         case T_CollateExpr:
+            elog(DEBUG2, "getUsedColumns: T_CollateExpr");
             getUsedColumns(((CollateExpr *)expr)->arg, quasarTable);
             break;
         case T_CaseExpr:
+            elog(DEBUG2, "getUsedColumns: T_CaseExpr");
             foreach(cell, ((CaseExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
@@ -982,22 +1146,26 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
             getUsedColumns(((CaseExpr *)expr)->defresult, quasarTable);
             break;
         case T_CaseWhen:
+            elog(DEBUG2, "getUsedColumns: T_CaseWhen");
             getUsedColumns(((CaseWhen *)expr)->expr, quasarTable);
             getUsedColumns(((CaseWhen *)expr)->result, quasarTable);
             break;
         case T_ArrayExpr:
+            elog(DEBUG2, "getUsedColumns: T_ArrayExpr");
             foreach(cell, ((ArrayExpr *)expr)->elements)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_RowExpr:
+            elog(DEBUG2, "getUsedColumns: T_RowExpr");
             foreach(cell, ((RowExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_RowCompareExpr:
+            elog(DEBUG2, "getUsedColumns: T_RowCompareExpr");
             foreach(cell, ((RowCompareExpr *)expr)->largs)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
@@ -1008,18 +1176,21 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
             }
             break;
         case T_CoalesceExpr:
+            elog(DEBUG2, "getUsedColumns: T_CoalesceExpr");
             foreach(cell, ((CoalesceExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_MinMaxExpr:
+            elog(DEBUG2, "getUsedColumns: T_MinMaxExpr");
             foreach(cell, ((MinMaxExpr *)expr)->args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
             }
             break;
         case T_XmlExpr:
+            elog(DEBUG2, "getUsedColumns: T_XmlExpr");
             foreach(cell, ((XmlExpr *)expr)->named_args)
             {
                 getUsedColumns((Expr *)lfirst(cell), quasarTable);
@@ -1030,12 +1201,15 @@ void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
             }
             break;
         case T_NullTest:
+            elog(DEBUG2, "getUsedColumns: T_NullTest");
             getUsedColumns(((NullTest *)expr)->arg, quasarTable);
             break;
         case T_BooleanTest:
+            elog(DEBUG2, "getUsedColumns: T_BooleanTest");
             getUsedColumns(((BooleanTest *)expr)->arg, quasarTable);
             break;
         case T_CoerceToDomain:
+            elog(DEBUG2, "getUsedColumns: T_CoerceToDomain");
             getUsedColumns(((CoerceToDomain *)expr)->arg, quasarTable);
             break;
         default:
@@ -1173,6 +1347,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
     switch(expr->type)
     {
     case T_Const:
+        elog(DEBUG2, "getQuasarWhereClause: T_Const");
         constant = (Const *)expr;
         if (constant->constisnull)
         {
@@ -1200,6 +1375,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         }
         break;
     case T_Param:
+        elog(DEBUG2, "getQuasarWhereClause: T_Param");
         param = (Param *)expr;
 
         if (! canHandleType(param->paramtype))
@@ -1227,6 +1403,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         break;
 
     case T_Var:
+        elog(DEBUG2, "getQuasarWhereClause: T_Var");
         variable = (Var *)expr;
 
         if (variable->varno == foreignrel->relid && variable->varlevelsup == 0)
@@ -1290,6 +1467,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
         break;
     case T_OpExpr:
+        elog(DEBUG2, "getQuasarWhereClause: T_OpExpr");
         oper = (OpExpr *)expr;
 
         /* get operator name, kind, argument type and schema */
@@ -1392,6 +1570,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         pfree(opername);
         break;
     case T_ScalarArrayOpExpr:
+        elog(DEBUG2, "getQuasarWhereClause: T_ScalarArrayOpExpr");
         arrayoper = (ScalarArrayOpExpr *)expr;
 
         /* get operator name, left argument type and schema */
@@ -1481,12 +1660,15 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
         break;
     case T_DistinctExpr:        /* (x IS DISTINCT FROM y) */
+        elog(DEBUG2, "getQuasarWhereClause: T_DistinctExpr");
         return NULL;
         break;
     case T_NullIfExpr:          /* NULLIF(x, y) */
+        elog(DEBUG2, "getQuasarWhereClause: T_NullIfExpr");
         return NULL;
         break;
     case T_BoolExpr:
+        elog(DEBUG2, "getQuasarWhereClause: T_BoolExpr");
         boolexpr = (BoolExpr *)expr;
 
         arg = getQuasarWhereClause(foreignrel, linitial(boolexpr->args), quasarTable, params);
@@ -1515,18 +1697,23 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
         break;
     case T_RelabelType:
+        elog(DEBUG2, "getQuasarWhereClause: T_RelabelType");
         return getQuasarWhereClause(foreignrel, ((RelabelType *)expr)->arg, quasarTable, params);
         break;
     case T_CoerceToDomain:
+        elog(DEBUG2, "getQuasarWhereClause: T_CoerceToDomain");
         return getQuasarWhereClause(foreignrel, ((CoerceToDomain *)expr)->arg, quasarTable, params);
         break;
     case T_CaseExpr:
+        elog(DEBUG2, "getQuasarWhereClause: T_CaseExpr");
         return NULL;
         break;
     case T_CoalesceExpr:
+        elog(DEBUG2, "getQuasarWhereClause: T_CoalesceExpr");
         return NULL;
         break;
     case T_NullTest:
+        elog(DEBUG2, "getQuasarWhereClause: T_NullTest");
         arg = getQuasarWhereClause(foreignrel, ((NullTest *)expr)->arg, quasarTable, params);
         if (arg == NULL)
             return NULL;
@@ -1537,6 +1724,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
                          ((NullTest *)expr)->nulltesttype == IS_NOT_NULL ? "NOT " : "");
         break;
     case T_FuncExpr:
+        elog(DEBUG2, "getQuasarWhereClause: T_FuncExpr");
         func = (FuncExpr *)expr;
 
         if (! canHandleType(func->funcresulttype))
@@ -1620,10 +1808,12 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         /*
          * Quasar doesn't support CAST
          */
+        elog(DEBUG2, "getQuasarWhereClause: T_CoerceViaIO");
         return NULL;
         break;
     default:
         /* we cannot translate this to Quasar */
+        elog(DEBUG2, "getQuasarWhereClause: Other: %d", expr->type);
         return NULL;
     }
 

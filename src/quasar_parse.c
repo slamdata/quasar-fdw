@@ -121,7 +121,7 @@ static void jsonAppendCommaIf(parser *p) {
 static void store_datum(parser *p, char *string, const char *fmt) {
     struct QuasarColumn *col = get_column(p);
 
-    elog(DEBUG1, "store_datum: level %d, %s", p->level, string);
+    elog(DEBUG3, "store_datum: level %d, %s", p->level, string);
 
     if (p->level == COLUMN_LEVEL) {
         p->slot->tts_values[p->cur_col] =
@@ -159,13 +159,13 @@ static void store_null(parser *p) {
 
 /* Yajl callbacks */
 static int cb_null(void * ctx) {
-    elog(DEBUG2, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
     store_null((parser*) ctx);
     return YAJL_OK;
 }
 
 static int cb_boolean(void * ctx, int boolean) {
-    elog(DEBUG2, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
     store_datum((parser*) ctx, boolean ? "true" : "false", "%s");
     return YAJL_OK;
 }
@@ -174,7 +174,7 @@ static int cb_boolean(void * ctx, int boolean) {
 static int cb_string(void * ctx,
                     const unsigned char * value,
                     size_t len) {
-    elog(DEBUG2, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
     char * s = pnstrdup((const char *)value, len);
     store_datum((parser*) ctx, s, "\"%s\"");
     pfree(s);
@@ -184,7 +184,7 @@ static int cb_string(void * ctx,
 static int cb_number(void * ctx,
                      const char * value,
                      size_t len) {
-    elog(DEBUG2, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
     char * s = pnstrdup(value, len);
     store_datum((parser*) ctx, s, "%s");
     pfree(s);
@@ -194,7 +194,7 @@ static int cb_number(void * ctx,
 static int cb_map_key(void * ctx,
                       const unsigned char * stringVal,
                       size_t stringLen) {
-    elog(DEBUG2, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     parser *p = (parser*) ctx;
     size_t i;
@@ -225,7 +225,7 @@ static int cb_map_key(void * ctx,
 }
 
 static int cb_start_map(void * ctx) {
-    elog(DEBUG2, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
     parser *p = (parser*) ctx;
     if (p->level == TOP_LEVEL && p->record_complete) {
         return YAJL_CANCEL;
@@ -245,7 +245,7 @@ static int cb_start_map(void * ctx) {
 
 
 static int cb_end_map(void * ctx) {
-    elog(DEBUG2, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     parser *p = (parser*) ctx;
     if (p->level > COLUMN_LEVEL) {
@@ -259,7 +259,7 @@ static int cb_end_map(void * ctx) {
     p->level--;
 
     if (p->level == COLUMN_LEVEL) {
-        elog(DEBUG2, "Parsed value for json json: %s", p->json.data);
+        elog(DEBUG3, "Parsed value for json json: %s", p->json.data);
         store_datum(p, pstrdup(p->json.data), "%s");
         resetStringInfo(&p->json);
     } else if (p->level == TOP_LEVEL) {
@@ -300,11 +300,11 @@ static int cb_end_array(void * ctx) {
     p->level--;
 
     if (p->level == COLUMN_LEVEL && is_json_type(p)) {
-        elog(DEBUG2, "Parsed value for deep json: %s", p->json.data);
+        elog(DEBUG3, "Parsed value for deep json: %s", p->json.data);
         store_datum(p, pstrdup(p->json.data), "%s");
         resetStringInfo(&p->json);
     } else if (p->level == COLUMN_LEVEL && is_array_type(p)) {
-        elog(DEBUG2, "Parsed value for deep array: %s", p->array.data);
+        elog(DEBUG3, "Parsed value for deep array: %s", p->array.data);
         store_datum(p, pstrdup(p->array.data), "%s");
         resetStringInfo(&p->array);
     }
@@ -343,7 +343,7 @@ static yajl_alloc_funcs allocs = {yajl_palloc, yajl_repalloc, yajl_pfree, NULL};
 
 
 void quasar_parse_alloc(quasar_parse_context *ctx, struct QuasarTable *table) {
-    elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     parser *p = palloc(sizeof(parser));
     p->cur_col = NO_COLUMN;
@@ -359,7 +359,7 @@ void quasar_parse_alloc(quasar_parse_context *ctx, struct QuasarTable *table) {
     yajl_parse(ctx->handle, NULL, 0); /* Allocate the lexer inside yajl */
 }
 void quasar_parse_free(quasar_parse_context *ctx) {
-    elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     yajl_free(ctx->handle);
     pfree(((parser*)ctx->p)->json.data);
@@ -368,7 +368,7 @@ void quasar_parse_free(quasar_parse_context *ctx) {
 }
 
 void quasar_parse_reset(quasar_parse_context *ctx) {
-    elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     parser *p = (parser*) ctx->p;
     p->cur_col = NO_COLUMN;
@@ -383,7 +383,7 @@ bool quasar_parse(quasar_parse_context *ctx,
                   const char *buffer,
                   size_t *buf_loc,
                   size_t buf_size) {
-    elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     bool found = false;
     parser *p = (parser*) ctx->p;
@@ -414,7 +414,7 @@ bool quasar_parse(quasar_parse_context *ctx,
             yajl_reset(ctx->handle);
         }
 
-        elog(DEBUG1, "Consumed %lu bytes of json. %s record",
+        elog(DEBUG3, "Consumed %lu bytes of json. %s record",
              bytes,
              p->record_complete ? "found" : "didnt find");
 
@@ -431,14 +431,14 @@ bool quasar_parse(quasar_parse_context *ctx,
 }
 
 bool quasar_parse_end(quasar_parse_context *ctx) {
-    elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     /* yajl_complete_parse(ctx->handle); */
     return ((parser*)ctx->p)->record_complete;
 }
 
 void quasar_parse_set_slot(quasar_parse_context *ctx, TupleTableSlot *slot) {
-    elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG3, "entering function %s", __func__);
 
     parser *p = (parser *) ctx->p;
     int i;

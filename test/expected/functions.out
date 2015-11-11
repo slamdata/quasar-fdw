@@ -1,4 +1,14 @@
 PREPARE statepop(char(2)) AS SELECT sum(pop) FROM zips WHERE state = $1;
 EXECUTE statepop('CO');
+   sum   
+---------
+ 3293755
+(1 row)
+
 EXECUTE statepop('RI');
+   sum   
+---------
+ 1003218
+(1 row)
+
 DEALLOCATE statepop;
