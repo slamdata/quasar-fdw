@@ -11,4 +11,12 @@ EXECUTE statepop('RI');
  1003218
 (1 row)
 
+EXPLAIN (COSTS off) EXECUTE statepop('MA');
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Aggregate
+   ->  Foreign Scan on zips
+         Quasar query: SELECT pop, state FROM zips WHERE (state = 'MA')
+(3 rows)
+
 DEALLOCATE statepop;

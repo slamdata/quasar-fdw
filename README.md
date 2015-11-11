@@ -4,6 +4,11 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 ## WIP Status
 
+11/11/2015:
+- Tell postgres to not execute WHERE filters when we are pushing a WHERE filter down.
+- Correctly serialize our private data between planning and executing. This was causing errors when memory contexts were switched for function execution.
+- Add function execution support with parameter expansion.
+
 11/10/2015:
 - I patched the json parser to have a reset feature so I didn't have to allocate every iteration. Interestingly, the parser lazy-allocates its lexer, which causes issues on the second iteration because each iteration is in a short-lived memory context. I had to force an allocation with `yajl_parse(handle, NULL, 0)` in the `BeginForeignScan` function in order to fix it.
 - Various fixes this morning:
