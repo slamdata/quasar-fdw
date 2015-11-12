@@ -90,7 +90,9 @@ CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
 SELECT city FROM zips LIMIT 3;
 ```
 
-## Testing
+## Development
+
+### Testing
 
 Setup:
 
@@ -105,6 +107,20 @@ And to test:
 make install installcheck
 ```
 
+### Adding operators
+
+If [quasar](https://github.com/quasar-analytics/quasar) adds operators, it would be good to update this FDW to support pushdown of that operator. This can be done in a few places:
+
+- For operators like math (+ - / ^ ...) or regex (~~ LIKE ...)
+  - search [quasar_fdw.c](src/quasar_fdw.c) for `/* OPERATORS */`
+  - add the new operator to the big `if` statement
+  - if the operator needs to be transformed to quasar syntax, do that below at `/* TRANSFORM BINARY OPERATOR */` or `/* TRANSFORM UNARY OPERATOR */`.
+  - Adding a scalar array operator such as ANY should be done at `/* SCALAR ARRAY OPERATOR */`, although its a little bit more complicated.
+- For functions like math (power) or string (capitalize)
+  - search [quasar_fdw.c](src/quasar_fdw.c) for `/* FUNCTIONS */`
+  - add the new function to the big `if` statement
+  - if the function needs to be transformed, do it at `/* FUNCTION TRANSFORMS */`
+- For more complicated things like ANY, CASE, NULLIF, etc, you'll have to find the correct case in the big switch statement in `getQuasarClause` and write the appropriate code to put the correct statement into `result`. Check out other cases to see what to do.
 
 ## License
 

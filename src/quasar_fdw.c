@@ -1498,6 +1498,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         if (! canHandleType(rightargtype))
             return NULL;
 
+        /* OPERATORS */
         /* the operators that we can translate */
         if (strcmp(opername, "=") == 0
             || strcmp(opername, "<>") == 0
@@ -1508,7 +1509,8 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
             || strcmp(opername, "+") == 0
             || strcmp(opername, "/") == 0
             /* Cannot subtract DATEs in Quasar */
-            || (strcmp(opername, "-") == 0 && rightargtype != DATEOID && rightargtype != TIMESTAMPOID
+            || (strcmp(opername, "-") == 0 && rightargtype != DATEOID
+                && rightargtype != TIMESTAMPOID
                 && rightargtype != TIMESTAMPTZOID)
             || strcmp(opername, "*") == 0
             || strcmp(opername, "~~") == 0
@@ -1531,6 +1533,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
             if (oprkind == 'b')
             {
+                /* TRANSFORM BINARY OPERATOR */
                 /* binary operator */
                 right = getQuasarWhereClause(foreignrel, lsecond(oper->args), quasarTable, params);
                 if (right == NULL)
@@ -1560,6 +1563,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
             }
             else
             {
+                /* TRANSFORM UNARY OPERATOR */
                 /* unary operator */
                 initStringInfo(&result);
                 /* unary + or - */
@@ -1756,6 +1760,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         if (schema != PG_CATALOG_NAMESPACE)
             return NULL;
 
+        /* FUNCTIONS */
         /* the "normal" functions that we can translate */
         if (strcmp(opername, "char_length") == 0
             || strcmp(opername, "character_length") == 0
@@ -1770,6 +1775,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         {
             initStringInfo(&result);
 
+            /* FUNCTION TRANSFORMS */
             if (strcmp(opername, "char_length") == 0 ||
                 strcmp(opername, "character_length") == 0)
                 appendStringInfo(&result, "length(");
