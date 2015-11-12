@@ -9,6 +9,9 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 - Correctly serialize our private data between planning and executing. This was causing errors when memory contexts were switched for function execution.
 - Add function execution support with parameter expansion.
 - Add input data conversion check for integers that look like floats
+- Talked with @johndegoes about things to ensure that work as well as next steps on packaging and QA
+- Ensured string->integer, string->date, float(.0)->integer conversions work.
+- Figured out a weird thing, if a date is string in underlying data and the schema calls it a date, we could try to pushdown a WHERE clause on the date, but quasar wouldn't be able to handle it. As such I added a new option on attributes called `nopushdown`, which will abandon pushing down any WHERE clause to quasar containing that column.
 
 11/10/2015:
 - I patched the json parser to have a reset feature so I didn't have to allocate every iteration. Interestingly, the parser lazy-allocates its lexer, which causes issues on the second iteration because each iteration is in a short-lived memory context. I had to force an allocation with `yajl_parse(handle, NULL, 0)` in the `BeginForeignScan` function in order to fix it.

@@ -32,5 +32,7 @@ SELECT loc FROM zips_bad LIMIT 1;
 SELECT pop, loc0 FROM zips_convert WHERE loc0 < -70 LIMIT 3;
 /* convert string timestamps to timestamp values */
 SELECT * FROM commits LIMIT 5;
+/* BUT we shouldn't push down comparisons on dates because the underlying data is string */
+SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52:37 2015';
 /* convert year as string to integers floats and dates */
 SELECT yr, yearint, yearfloat FROM olympics WHERE "yr" = '1924' LIMIT 3;

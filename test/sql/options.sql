@@ -13,8 +13,8 @@ CREATE FOREIGN TABLE o_zips(city varchar, pop integer, state char(2))
 /* Attribute Options */
 CREATE FOREIGN TABLE o_bad_attr_opt(city varchar OPTIONS (none 'yoyo'))
        SERVER o_quasar OPTIONS (table 'zips');
-CREATE FOREIGN TABLE o_nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
-                            b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
-                            c varchar OPTIONS (map 'topObj.midObj.botObj.c'))
-       SERVER o_quasar
-       OPTIONS (table 'nested');
+CREATE FOREIGN TABLE o_nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a',
+                                                 nopushdown 'true'),
+                              b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
+                              c varchar OPTIONS (map 'topObj.midObj.botObj.c'))
+       SERVER o_quasar OPTIONS (table 'nested');

@@ -814,6 +814,10 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
                 {
                     col->name = defGetString(def);
                 }
+
+                if (strcmp(def->defname, "nopushdown") == 0) {
+                    col->nopushdown = true;
+                }
             }
 
             if (col->name == NULL) {
@@ -1433,6 +1437,10 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
                 appendStringInfo(&result, "NULL");
                 break;
             }
+
+            /* Abandon pushdown if user told us not to pushdown this column */
+            if (quasarTable->cols[index]->nopushdown)
+                return NULL;
 
             initStringInfo(&result);
             appendStringInfo(&result, "%s", quasarTable->cols[index]->name);

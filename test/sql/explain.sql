@@ -25,3 +25,5 @@ EXPLAIN (COSTS off) SELECT zips.city AS city, pop, state, loc
                     LIMIT 3;
 /* query for a missing field */
 EXPLAIN (COSTS off) SELECT missing, city FROM zips_missing LIMIT 3;
+/* No pushdown of `nopushdown` columns */
+EXPLAIN SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52:37 2015';

@@ -18,7 +18,7 @@ CREATE FOREIGN TABLE zips_bad(loc float) -- BAD Field type
 CREATE FOREIGN TABLE zips_convert(pop integer, loc0 float OPTIONS (map 'loc[0]'))
        SERVER quasar OPTIONS (table 'smallZips');
 CREATE FOREIGN TABLE commits
-       (ts timestamp OPTIONS (map 'commit.author.date')
+       (ts timestamp OPTIONS (map 'commit.author.date', nopushdown 'true')
        ,sha varchar
        ,author_name varchar OPTIONS (map 'commit.author.name')
        ,author_email varchar OPTIONS (map 'commit.author.email')

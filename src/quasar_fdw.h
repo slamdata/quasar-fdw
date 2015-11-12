@@ -54,6 +54,11 @@ struct QuasarColumn
     /* char align;              /\* element alignment *\/ */
     int used;                /* is the column used in the query? */
     int warn;                /* Boolean if a warning has been issued for this col */
+    bool nopushdown;         /* User option to force no pushdown of any clause
+                              * with this column in it
+                              * Use it when a value isn't the correct type in
+                              * underlying data (such as string in mongo instead
+                              * of int or date) */
 };
 
 struct QuasarTable

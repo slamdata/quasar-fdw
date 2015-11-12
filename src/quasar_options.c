@@ -72,6 +72,7 @@ static struct QuasarFdwOption valid_options[] =
     { "table",   ForeignTableRelationId },
     /* Available options for columns inside CREATE FOREIGN TABLE */
     { "map",     AttributeRelationId },
+    { "nopushdown", AttributeRelationId },
     /* Sentinel */
     { NULL,     InvalidOid }
 };
