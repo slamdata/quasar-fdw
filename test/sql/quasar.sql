@@ -41,3 +41,6 @@ SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 /* push down conca
                         AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
 /* LIKE operator only supports constant right sides */
 SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);
+/* array expansion */
+SELECT * FROM user_comments;
+SELECT * FROM nested_expansion;

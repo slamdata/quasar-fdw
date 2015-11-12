@@ -12,6 +12,8 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 - Talked with @johndegoes about things to ensure that work as well as next steps on packaging and QA
 - Ensured string->integer, string->date, float(.0)->integer conversions work.
 - Figured out a weird thing, if a date is string in underlying data and the schema calls it a date, we could try to pushdown a WHERE clause on the date, but quasar wouldn't be able to handle it. As such I added a new option on attributes called `nopushdown`, which will abandon pushing down any WHERE clause to quasar containing that column.
+- Tested some more functions like string concat
+- Test array expansion in queries
 
 11/10/2015:
 - I patched the json parser to have a reset feature so I didn't have to allocate every iteration. Interestingly, the parser lazy-allocates its lexer, which causes issues on the second iteration because each iteration is in a short-lived memory context. I had to force an allocation with `yajl_parse(handle, NULL, 0)` in the `BeginForeignScan` function in order to fix it.
@@ -92,13 +94,9 @@ SELECT city FROM zips LIMIT 3;
 
 ### Gotchyas
 
-- If one of your fields uses a quasar-reserved word (such as `date`, you must quote the field using an attribute option:
+- If one of your fields uses a quasar-reserved word (such as `date`, you must quote the field using an attribute option: `OPTIONS (map 'comment."date"')`
+- Postgres will downcase all field names, so if a field has a capital letter in it, you must use the map option: `OPTIONS (map "camelCaseSensitive")`
 
-```
-CREATE FOREIGN TABLE <table> (<field> <type> OPTIONS (map '<something>."date"')) SERVER <server> OPTIONS (table '<table>');
-```
-
-The reason that the fdw doesn't quote all the time is that some selectors _can't_ be quoted, such as those with array expansions `array[*].field`.
 
 ## Development
 

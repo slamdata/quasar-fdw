@@ -37,3 +37,16 @@ CREATE FOREIGN TABLE olympics
        ,gender char(1)
        ,type varchar)
        SERVER quasar OPTIONS (table 'olympics');
+CREATE FOREIGN TABLE nested_expansion (vals integer OPTIONS (map 'topArr[*].botArr[*]'), topObj json OPTIONS (map 'topObj'))
+       SERVER quasar OPTIONS (table 'nested');
+CREATE FOREIGN TABLE user_comments
+       (user_id integer OPTIONS (map 'userId')
+       ,profile_name varchar OPTIONS (map 'profile.name')
+       ,age integer OPTIONS (map 'profile.age')
+       ,title varchar OPTIONS (map 'profile.title')
+       ,comment_id char(10) OPTIONS (map 'comments[*].id')
+       ,comment_text varchar OPTIONS (map 'comments[*].text')
+       ,comment_reply_to_profile integer OPTIONS (map 'comments[*].replyTo[0]')
+       ,comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
+       ,comment_time date OPTIONS (map 'comments[*]."time"'))
+       SERVER quasar OPTIONS (table 'user_comments');

@@ -170,3 +170,19 @@ SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);
 ------+-----+-------
 (0 rows)
 
+/* array expansion */
+SELECT * FROM user_comments;
+ user_id | profile_name | age | title | comment_id | comment_text | comment_reply_to_profile | comment_reply_to_comment | comment_time 
+---------+--------------+-----+-------+------------+--------------+--------------------------+--------------------------+--------------
+ 8927524 | Mary Jane    |  29 | Dr    | F2372BAC   | I concur.    |                  9817361 | F8ACD164F                | 02-03-2015
+ 8927524 | Mary Jane    |  29 | Dr    | GH732AFC   | NA           |                  9654726 | A44124F                  | 03-01-2015
+(2 rows)
+
+SELECT * FROM nested_expansion;
+ vals |                                                       topobj                                                        
+------+---------------------------------------------------------------------------------------------------------------------
+    7 | {"midArr":[[10,11,12],{"a":"j","b":"k","c":"l"}],"midObj":{"botArr":[13,14,15],"botObj":{"a":"m","b":"n","c":"o"}}}
+    8 | {"midArr":[[10,11,12],{"a":"j","b":"k","c":"l"}],"midObj":{"botArr":[13,14,15],"botObj":{"a":"m","b":"n","c":"o"}}}
+    9 | {"midArr":[[10,11,12],{"a":"j","b":"k","c":"l"}],"midObj":{"botArr":[13,14,15],"botObj":{"a":"m","b":"n","c":"o"}}}
+(3 rows)
+
