@@ -887,9 +887,9 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
                 first_col = false;
             }
             if (strcmp(col->name, col->pgname) != 0) {
-                appendStringInfo(&query, "\"%s\" AS %s", col->name, col->pgname);
+                appendStringInfo(&query, "%s AS %s", col->name, col->pgname);
             } else {
-                appendStringInfo(&query, "\"%s\"", col->name);
+                appendStringInfo(&query, "%s", col->name);
             }
         }
     }

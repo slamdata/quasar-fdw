@@ -118,11 +118,11 @@ WARNING:  quasar_fdw: column loc is scalar type but got json/array response.
 /* Make quasar_fdw convert a float to integer
  * Quasar converts pop to a float and we convert it back */
 SELECT pop, loc0 FROM zips_convert WHERE loc0 < -70 LIMIT 3;
-  pop  | loc0 
--------+------
- 15338 |     
- 36963 |     
-  4546 |     
+  pop  |    loc0    
+-------+------------
+ 15338 | -72.622739
+ 36963 |  -72.51565
+  4546 | -72.108354
 (3 rows)
 
 /* convert string timestamps to timestamp values */

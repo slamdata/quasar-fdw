@@ -90,6 +90,16 @@ CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
 SELECT city FROM zips LIMIT 3;
 ```
 
+### Gotchyas
+
+- If one of your fields uses a quasar-reserved word (such as `date`, you must quote the field using an attribute option:
+
+```
+CREATE FOREIGN TABLE <table> (<field> <type> OPTIONS (map '<something>."date"')) SERVER <server> OPTIONS (table '<table>');
+```
+
+The reason that the fdw doesn't quote all the time is that some selectors _can't_ be quoted, such as those with array expansions `array[*].field`.
+
 ## Development
 
 ### Testing
