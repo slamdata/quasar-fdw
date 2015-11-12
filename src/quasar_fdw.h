@@ -53,6 +53,7 @@ struct QuasarColumn
     /* bool byval;              /\* element by value *\/ */
     /* char align;              /\* element alignment *\/ */
     int used;                /* is the column used in the query? */
+    int warn;                /* Boolean if a warning has been issued for this col */
 };
 
 struct QuasarTable

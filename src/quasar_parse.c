@@ -42,6 +42,7 @@ typedef struct parser {
     int level;
     StringInfoData json;
     StringInfoData array;
+    int warned;
 } parser;
 
 /* Utilities */
@@ -53,6 +54,8 @@ static void arrayAppendCommaIf(parser *p);
 static void store_datum(parser *p, char *string, const char *fmt);
 static void store_null(parser *p);
 void finalize_tuple(quasar_parse_context *ctx, TupleTableSlot *slot);
+bool warncheck(parser *p);
+char *checkConversions(struct QuasarColumn *col, char *value);
 
 /* Alloc callbacks */
 void *yajl_palloc(void *ctx, size_t sz);
@@ -70,11 +73,20 @@ static int cb_end_map(void * ctx);
 static int cb_start_array(void * ctx);
 static int cb_end_array(void * ctx);
 
+bool warncheck(parser *p) {
+    struct QuasarColumn *col = get_column(p);
+    if (col->warn == 0) {
+        col->warn = 1;
+        return true;
+    }
+    return false;
+}
+
 static struct QuasarColumn *get_column(parser *p) {
     if (p->cur_col != NO_COLUMN) {
         return p->table->cols[p->cur_col];
     } else {
-        elog(ERROR, "Got a value when no column specified!");
+        elog(ERROR, "quasar_fdw internal: Got a value when no column specified!");
     }
 }
 
@@ -118,12 +130,29 @@ static void jsonAppendCommaIf(parser *p) {
     }
 }
 
+char *checkConversions(struct QuasarColumn *col, char *value) {
+    if (col->arrdims > 0) return value;
+    size_t len = strlen(value);
+
+    switch (col->pgtype) {
+    case INT2OID:
+    case INT4OID:
+        /* Sometimes we get floats with .0 from quasar for ints */
+        if (len > 2 && strcmp(value + len - 2, ".0") == 0)
+            value[len - 2] = '\0';
+        return value;
+    default:
+        return value;
+    }
+}
+
 static void store_datum(parser *p, char *string, const char *fmt) {
     struct QuasarColumn *col = get_column(p);
 
     elog(DEBUG3, "store_datum: level %d, %s", p->level, string);
 
     if (p->level == COLUMN_LEVEL) {
+        string = checkConversions(col, string);
         p->slot->tts_values[p->cur_col] =
             InputFunctionCall(&col->typinput,
                               string,
@@ -153,7 +182,7 @@ static void store_null(parser *p) {
         p->slot->tts_values[p->cur_col] = PointerGetDatum(NULL);
         p->slot->tts_isnull[p->cur_col] = true;
     } else {
-        elog(ERROR, "storing null when level is above columns");
+        elog(ERROR, "quasar_fdw internal: storing null when level is above columns");
     }
 }
 
@@ -210,14 +239,12 @@ static int cb_map_key(void * ctx,
             }
         }
         if (p->cur_col == NO_COLUMN) {
-            elog(ERROR, "Couldnt find column for returned JSON field: %s", s);
+            elog(ERROR, "quasar_fdw internal: Couldnt find column for returned field: %s", s);
         }
     } else if (p->level > COLUMN_LEVEL) {
         if (is_json_type(p)) {
             jsonAppendCommaIf(p);
             appendStringInfo(&p->json, "\"%s\":", s);
-        } else {
-            elog(ERROR, "Got map key inside non-json type");
         }
     }
     pfree(s);
@@ -235,8 +262,8 @@ static int cb_start_map(void * ctx) {
         if (is_json_type(p)) {
             jsonAppendCommaIf(p);
             appendStringInfoChar(&p->json, '{');
-        } else {
-            elog(ERROR, "Got opening map inside non-json type");
+        } else if (warncheck(p)) {
+            elog(WARNING, "quasar_fdw: column %s is scalar type but got json response.", get_column(p)->pgname);
         }
     }
     p->level++;
@@ -251,17 +278,19 @@ static int cb_end_map(void * ctx) {
     if (p->level > COLUMN_LEVEL) {
         if (is_json_type(p)) {
             appendStringInfoChar(&p->json, '}');
-        } else {
-            elog(ERROR, "Got closing map inside non-json type");
         }
     }
 
     p->level--;
 
     if (p->level == COLUMN_LEVEL) {
-        elog(DEBUG3, "Parsed value for json json: %s", p->json.data);
-        store_datum(p, pstrdup(p->json.data), "%s");
-        resetStringInfo(&p->json);
+        if (p->json.len == 0) {
+            store_null(p);
+        } else {
+            elog(DEBUG3, "Parsed value for json json: %s", p->json.data);
+            store_datum(p, pstrdup(p->json.data), "%s");
+            resetStringInfo(&p->json);
+        }
     } else if (p->level == TOP_LEVEL) {
         p->record_complete = true;
     }
@@ -277,8 +306,6 @@ static int cb_start_array(void * ctx) {
         } else if (is_json_type(p)) {
             jsonAppendCommaIf(p);
             appendStringInfoChar(&p->json, '[');
-        } else {
-            elog(ERROR, "Got opening array inside non-array, non-json type");
         }
     }
     p->level++;
@@ -292,21 +319,29 @@ static int cb_end_array(void * ctx) {
             appendStringInfoChar(&p->array, '}');
         } else if (is_json_type(p)) {
             appendStringInfo(&p->json, "]");
-        } else {
-            elog(ERROR, "Got closing array inside non-array, non-json type");
+        } else if (warncheck(p)) {
+            elog(WARNING, "quasar_fdw: column %s is scalar type but got json/array response.", get_column(p)->pgname);
         }
     }
 
     p->level--;
 
     if (p->level == COLUMN_LEVEL && is_json_type(p)) {
-        elog(DEBUG3, "Parsed value for deep json: %s", p->json.data);
-        store_datum(p, pstrdup(p->json.data), "%s");
-        resetStringInfo(&p->json);
+        if (p->json.len == 0)
+            store_null(p);
+        else {
+            elog(DEBUG3, "Parsed value for deep json: %s", p->json.data);
+            store_datum(p, pstrdup(p->json.data), "%s");
+            resetStringInfo(&p->json);
+        }
     } else if (p->level == COLUMN_LEVEL && is_array_type(p)) {
-        elog(DEBUG3, "Parsed value for deep array: %s", p->array.data);
-        store_datum(p, pstrdup(p->array.data), "%s");
-        resetStringInfo(&p->array);
+        if (p->array.len == 0) {
+            store_null(p);
+        } else {
+            elog(DEBUG3, "Parsed value for deep array: %s", p->array.data);
+            store_datum(p, pstrdup(p->array.data), "%s");
+            resetStringInfo(&p->array);
+        }
     }
     return YAJL_OK;
 }
@@ -408,7 +443,7 @@ bool quasar_parse(quasar_parse_context *ctx,
                 yajl_get_error(hand, 1,
                                (const unsigned char *)buffer + *buf_loc,
                                buf_size - *buf_loc);
-            elog(ERROR, "Error parsing json: %s", errstr);
+            elog(ERROR, "quasar_fdw internal: Error parsing json: %s", errstr);
         } else if (status == yajl_status_client_canceled) {
             bytes--;
             yajl_reset(ctx->handle);

@@ -54,20 +54,20 @@ EXPLAIN (COSTS off) SELECT city,pop FROM zips WHERE pop % 2 = 1 LIMIT 3;
 
 /* Test out array usage */
 EXPLAIN (COSTS off) SELECT * FROM zipsloc LIMIT 2;
-                 QUERY PLAN                 
---------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Limit
    ->  Foreign Scan on zipsloc
-         Quasar query: SELECT loc FROM zips
+         Quasar query: SELECT loc FROM smallZips
 (3 rows)
 
 /* Test out json usage */
 EXPLAIN (COSTS off) SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
-                       QUERY PLAN                        
----------------------------------------------------------
+                          QUERY PLAN                          
+--------------------------------------------------------------
  Limit
    ->  Foreign Scan on zipsjson
-         Quasar query: SELECT loc, loc AS locb FROM zips
+         Quasar query: SELECT loc, loc AS locb FROM smallZips
 (3 rows)
 
 /* Pushdown regex operators */
@@ -108,15 +108,15 @@ EXPLAIN (COSTS off) SELECT zips.city AS city, pop, state, loc
          ->  Foreign Scan on zips
                Quasar query: SELECT city, pop, state FROM zips
          ->  Foreign Scan on zipsjson
-               Quasar query: SELECT city, loc FROM zips
+               Quasar query: SELECT city, loc FROM smallZips
 (7 rows)
 
 /* query for a missing field */
 EXPLAIN (COSTS off) SELECT missing, city FROM zips_missing LIMIT 3;
-                      QUERY PLAN                      
-------------------------------------------------------
+                        QUERY PLAN                         
+-----------------------------------------------------------
  Limit
    ->  Foreign Scan on zips_missing
-         Quasar query: SELECT city, missing FROM zips
+         Quasar query: SELECT city, missing FROM smallZips
 (3 rows)
 
