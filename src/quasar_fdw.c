@@ -1301,6 +1301,7 @@ static char
             appendStringInfo(&result, "INTERVAL '%s'", str);
             break;
         default:
+            elog(DEBUG2, "quasar_fdw: dont know how to get cstring from %d", type);
             return NULL;
     }
 
@@ -1527,8 +1528,9 @@ getQuasarClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *qu
                 && rightargtype != TIMESTAMPOID
                 && rightargtype != TIMESTAMPTZOID)
             || strcmp(opername, "*") == 0
-            || strcmp(opername, "~~") == 0
-            || strcmp(opername, "!~~") == 0
+            /* Regexes in Quasar only take constant right sides */
+            || (strcmp(opername, "~~") == 0 && ((Expr*)lsecond(oper->args))->type == T_Const)
+            || (strcmp(opername, "!~~") == 0 && ((Expr*)lsecond(oper->args))->type == T_Const)
             /* || strcmp(opername, "~~*") == 0 */ /* Case Insensitive LIKE */
             /* || strcmp(opername, "!~~*") == 0 */ /* Not Case Insensitive LIKE */
             /* || strcmp(opername, "^") == 0 */ /* Power */

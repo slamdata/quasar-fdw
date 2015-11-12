@@ -26,4 +26,11 @@ EXPLAIN (COSTS off) SELECT zips.city AS city, pop, state, loc
 /* query for a missing field */
 EXPLAIN (COSTS off) SELECT missing, city FROM zips_missing LIMIT 3;
 /* No pushdown of `nopushdown` columns */
-EXPLAIN SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52:37 2015';
+EXPLAIN (COSTS off) SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52:37 2015';
+/* Pushdown of concat */
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 AND state LIKE concat('M'::char, '%'::char) LIMIT 5;
+/* pushdown of concat */
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 /* push down concat columns */
+                                            AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
+/* LIKE operator only supports constant right sides */
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);

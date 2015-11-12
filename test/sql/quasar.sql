@@ -36,3 +36,8 @@ SELECT * FROM commits LIMIT 5;
 SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52:37 2015';
 /* convert year as string to integers floats and dates */
 SELECT yr, yearint, yearfloat FROM olympics WHERE "yr" = '1924' LIMIT 3;
+/* pushdown of concat */
+SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 /* push down concat columns */
+                        AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
+/* LIKE operator only supports constant right sides */
+SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);

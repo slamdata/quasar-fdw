@@ -121,11 +121,40 @@ EXPLAIN (COSTS off) SELECT missing, city FROM zips_missing LIMIT 3;
 (3 rows)
 
 /* No pushdown of `nopushdown` columns */
-EXPLAIN SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52:37 2015';
+EXPLAIN (COSTS off) SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52:37 2015';
                                                                                                   QUERY PLAN                                                                                                  
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Foreign Scan on commits  (cost=100.00..101.00 rows=1 width=140)
+ Foreign Scan on commits
    Filter: (ts = 'Thu Jan 29 15:52:37 2015'::timestamp without time zone)
    Quasar query: SELECT "commit.author.date" AS ts, "sha", "commit.author.name" AS author_name, "commit.author.email" AS author_email, "url", "commit.comment_count" AS comment_count FROM slamengine_commits
+(3 rows)
+
+/* Pushdown of concat */
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 AND state LIKE concat('M'::char, '%'::char) LIMIT 5;
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Limit
+   ->  Foreign Scan on smallzips
+         Filter: (state ~~ concat('M'::character(1), '%'::character(1)))
+         Quasar query: SELECT "city", "pop", "state" FROM smallZips WHERE (length(concat(state,city)) > 4)
+(4 rows)
+
+/* pushdown of concat */
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 /* push down concat columns */
+                                            AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
+                                                               QUERY PLAN                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------
+ Limit
+   ->  Foreign Scan on smallzips
+         Quasar query: SELECT "city", "pop", "state" FROM smallZips WHERE (length(concat(state,city)) > 4) AND (state = concat('M','A'))
+(3 rows)
+
+/* LIKE operator only supports constant right sides */
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Foreign Scan on smallzips
+   Filter: (state ~~ concat('B'::character(1), '%'::character(1)))
+   Quasar query: SELECT "city", "pop", "state" FROM smallZips
 (3 rows)
 

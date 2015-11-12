@@ -152,3 +152,21 @@ SELECT yr, yearint, yearfloat FROM olympics WHERE "yr" = '1924' LIMIT 3;
  1924 |    1924 |      1924
 (3 rows)
 
+/* pushdown of concat */
+SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 /* push down concat columns */
+                        AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
+    city     |  pop  | state 
+-------------+-------+-------
+ AGAWAM      | 15338 | MA
+ CUSHMAN     | 36963 | MA
+ BARRE       |  4546 | MA
+ BELCHERTOWN | 10579 | MA
+ BLANDFORD   |  1240 | MA
+(5 rows)
+
+/* LIKE operator only supports constant right sides */
+SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);
+ city | pop | state 
+------+-----+-------
+(0 rows)
+
