@@ -531,10 +531,11 @@ quasarIterateForeignScan(ForeignScanState *node)
     ExecClearTuple(slot);
     quasar_parse_set_slot(festate->parse_ctx, slot);
 
-
-    /* Continue the curl operation until we have data */
     for (;;) {
-        if (festate->ongoing_transfers == 1) {
+
+        /* Pull down more data when we don't have data */
+        if (festate->ongoing_transfers == 1
+            && festate->buffer_offset == festate->curl_ctx->buffer.len) {
             elog(DEBUG2, "quasar_fdw: continuing curl transfer");
             time = clock();
 
