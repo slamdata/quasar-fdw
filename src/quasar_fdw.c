@@ -140,7 +140,7 @@ static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan);
 struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt);
 void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable);
-char *getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params);
+char *getQuasarClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params);
 List *serializePlanState(struct QuasarFdwPlanState *fdwState);
 struct QuasarFdwPlanState *deserializePlanState(List *l);
 static char *datumToString(Datum datum, Oid type);
@@ -910,7 +910,7 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
     foreach(cell, conditions)
     {
         /* try to convert each condition to Oracle SQL */
-        where = getQuasarWhereClause(foreignrel, ((RestrictInfo *)lfirst(cell))->clause, quasarTable, params);
+        where = getQuasarClause(foreignrel, ((RestrictInfo *)lfirst(cell))->clause, quasarTable, params);
         if (where != NULL) {
             /* append new WHERE clause to query string */
             if (first_col)
@@ -1308,7 +1308,7 @@ static char
 }
 
 /*
- * This macro is used by getQuasarWhereClause to identify PostgreSQL
+ * This macro is used by getQuasarClause to identify PostgreSQL
  * types that can be translated to Quasar SQL-2.
  */
 #define canHandleType(x) ((x) == TEXTOID || (x) == CHAROID || (x) == BPCHAROID \
@@ -1317,15 +1317,29 @@ static char
                           || (x) == NUMERICOID || (x) == DATEOID || (x) == TIMEOID || (x) == TIMESTAMPOID \
                           || (x) == INTERVALOID || (x) == BOOLOID)
 
+/* macro used by getQuasarClause
+ * Recursively calls getQuasarClause on an expr
+ * and checks it for NULL, returns NULL after freeing things
+ */
+#define renderFree2(name, expr, free1, free2)                           \
+    name = getQuasarClause(foreignrel, (expr), quasarTable, params);    \
+    if (name == NULL) {                                                 \
+        if ((free1) != NULL) pfree((free1));                            \
+        if ((free2) != NULL) pfree((free2));                            \
+        return NULL;                                                    \
+    }
+#define render(name, expr) renderFree2(name, expr, NULL, NULL);
+#define renderFree(name, expr, free) renderFree2(name, expr, free, NULL);
+
 /*
- * getQuasarWhereClause
+ * getQuasarClause
  *      Create an Quasar SQL WHERE clause from the expression and store in in "where".
  *      Returns NULL if that is not possible, else a palloc'ed string.
  *      As a side effect, all Params incorporated in the WHERE clause
  *      will be stored in paramList.
  */
 char *
-getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params)
+getQuasarClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params)
 {
     char *opername, *left, *right, *arg, oprkind;
     Const *constant;
@@ -1351,7 +1365,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
     switch(expr->type)
     {
     case T_Const:
-        elog(DEBUG2, "getQuasarWhereClause: T_Const");
+        elog(DEBUG2, "getQuasarClause: T_Const");
         constant = (Const *)expr;
         if (constant->constisnull)
         {
@@ -1379,7 +1393,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         }
         break;
     case T_Param:
-        elog(DEBUG2, "getQuasarWhereClause: T_Param");
+        elog(DEBUG2, "getQuasarClause: T_Param");
         param = (Param *)expr;
 
         if (! canHandleType(param->paramtype))
@@ -1407,7 +1421,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         break;
 
     case T_Var:
-        elog(DEBUG2, "getQuasarWhereClause: T_Var");
+        elog(DEBUG2, "getQuasarClause: T_Var");
         variable = (Var *)expr;
 
         if (variable->varno == foreignrel->relid && variable->varlevelsup == 0)
@@ -1475,7 +1489,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
         break;
     case T_OpExpr:
-        elog(DEBUG2, "getQuasarWhereClause: T_OpExpr");
+        elog(DEBUG2, "getQuasarClause: T_OpExpr");
         oper = (OpExpr *)expr;
 
         /* get operator name, kind, argument type and schema */
@@ -1524,24 +1538,12 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
             /* || strcmp(opername, "@") == 0 */ /* Absolute Value */
             )
         {
-            left = getQuasarWhereClause(foreignrel, linitial(oper->args), quasarTable, params);
-            if (left == NULL)
-            {
-                pfree(opername);
-                return NULL;
-            }
+            renderFree(left, linitial(oper->args), opername);
 
             if (oprkind == 'b')
             {
                 /* TRANSFORM BINARY OPERATOR */
-                /* binary operator */
-                right = getQuasarWhereClause(foreignrel, lsecond(oper->args), quasarTable, params);
-                if (right == NULL)
-                {
-                    pfree(left);
-                    pfree(opername);
-                    return NULL;
-                }
+                renderFree2(right, lsecond(oper->args), left, opername);
 
                 initStringInfo(&result);
                 if (strcmp(opername, "~~") == 0)
@@ -1582,7 +1584,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         pfree(opername);
         break;
     case T_ScalarArrayOpExpr:
-        elog(DEBUG2, "getQuasarWhereClause: T_ScalarArrayOpExpr");
+        elog(DEBUG2, "getQuasarClause: T_ScalarArrayOpExpr");
         arrayoper = (ScalarArrayOpExpr *)expr;
 
         /* get operator name, left argument type and schema */
@@ -1617,9 +1619,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         if (! canHandleType(leftargtype))
             return NULL;
 
-        left = getQuasarWhereClause(foreignrel, linitial(arrayoper->args), quasarTable, params);
-        if (left == NULL)
-            return NULL;
+        render(left, linitial(arrayoper->args));
 
         /* only push down IN expressions with constant second (=last) argument */
         if (((Expr *)llast(arrayoper->args))->type != T_Const)
@@ -1672,18 +1672,18 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
         break;
     case T_DistinctExpr:        /* (x IS DISTINCT FROM y) */
-        elog(DEBUG2, "getQuasarWhereClause: T_DistinctExpr");
+        elog(DEBUG2, "getQuasarClause: T_DistinctExpr");
         return NULL;
         break;
     case T_NullIfExpr:          /* NULLIF(x, y) */
-        elog(DEBUG2, "getQuasarWhereClause: T_NullIfExpr");
+        elog(DEBUG2, "getQuasarClause: T_NullIfExpr");
         return NULL;
         break;
     case T_BoolExpr:
-        elog(DEBUG2, "getQuasarWhereClause: T_BoolExpr");
+        elog(DEBUG2, "getQuasarClause: T_BoolExpr");
         boolexpr = (BoolExpr *)expr;
 
-        arg = getQuasarWhereClause(foreignrel, linitial(boolexpr->args), quasarTable, params);
+        arg = getQuasarClause(foreignrel, linitial(boolexpr->args), quasarTable, params);
         if (arg == NULL)
             return NULL;
 
@@ -1694,12 +1694,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
         for_each_cell(cell, lnext(list_head(boolexpr->args)))
         {
-            arg = getQuasarWhereClause(foreignrel, (Expr *)lfirst(cell), quasarTable, params);
-            if (arg == NULL)
-            {
-                pfree(result.data);
-                return NULL;
-            }
+            renderFree(arg, (Expr*) lfirst(cell), result.data);
 
             appendStringInfo(&result, " %s %s",
                              boolexpr->boolop == AND_EXPR ? "AND" : "OR",
@@ -1709,26 +1704,24 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
         break;
     case T_RelabelType:
-        elog(DEBUG2, "getQuasarWhereClause: T_RelabelType");
-        return getQuasarWhereClause(foreignrel, ((RelabelType *)expr)->arg, quasarTable, params);
+        elog(DEBUG2, "getQuasarClause: T_RelabelType");
+        return getQuasarClause(foreignrel, ((RelabelType *)expr)->arg, quasarTable, params);
         break;
     case T_CoerceToDomain:
-        elog(DEBUG2, "getQuasarWhereClause: T_CoerceToDomain");
-        return getQuasarWhereClause(foreignrel, ((CoerceToDomain *)expr)->arg, quasarTable, params);
+        elog(DEBUG2, "getQuasarClause: T_CoerceToDomain");
+        return getQuasarClause(foreignrel, ((CoerceToDomain *)expr)->arg, quasarTable, params);
         break;
     case T_CaseExpr:
-        elog(DEBUG2, "getQuasarWhereClause: T_CaseExpr");
+        elog(DEBUG2, "getQuasarClause: T_CaseExpr");
         return NULL;
         break;
     case T_CoalesceExpr:
-        elog(DEBUG2, "getQuasarWhereClause: T_CoalesceExpr");
+        elog(DEBUG2, "getQuasarClause: T_CoalesceExpr");
         return NULL;
         break;
     case T_NullTest:
-        elog(DEBUG2, "getQuasarWhereClause: T_NullTest");
-        arg = getQuasarWhereClause(foreignrel, ((NullTest *)expr)->arg, quasarTable, params);
-        if (arg == NULL)
-            return NULL;
+        elog(DEBUG2, "getQuasarClause: T_NullTest");
+        render(arg, ((NullTest *)expr)->arg);
 
         initStringInfo(&result);
         appendStringInfo(&result, "(%s IS %sNULL)",
@@ -1736,7 +1729,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
                          ((NullTest *)expr)->nulltesttype == IS_NOT_NULL ? "NOT " : "");
         break;
     case T_FuncExpr:
-        elog(DEBUG2, "getQuasarWhereClause: T_FuncExpr");
+        elog(DEBUG2, "getQuasarClause: T_FuncExpr");
         func = (FuncExpr *)expr;
 
         if (! canHandleType(func->funcresulttype))
@@ -1744,7 +1737,7 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
 
         /* do nothing for implicit casts */
         if (func->funcformat == COERCE_IMPLICIT_CAST)
-            return getQuasarWhereClause(foreignrel, linitial(func->args), quasarTable, params);
+            return getQuasarClause(foreignrel, linitial(func->args), quasarTable, params);
 
         /* get function name and schema */
         tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func->funcid));
@@ -1787,27 +1780,16 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
             first_arg = true;
             foreach(cell, func->args)
             {
-                arg = getQuasarWhereClause(foreignrel, lfirst(cell), quasarTable, params);
-                if (arg == NULL)
-                {
-                    pfree(result.data);
-                    pfree(opername);
-                    return NULL;
-                }
+                renderFree2(arg, lfirst(cell), result.data, opername);
 
-                if (first_arg)
-                {
-                    first_arg = false;
-                    appendStringInfo(&result, "%s", arg);
-                }
-                else
-                {
-                    appendStringInfo(&result, ", %s", arg);
-                }
+                if (!first_arg) appendStringInfoChar(&result, ',');
+                appendStringInfo(&result, "%s", arg);
+                first_arg = false;
+
                 pfree(arg);
             }
 
-            appendStringInfo(&result, ")");
+            appendStringInfoChar(&result, ')');
         }
         else
         {
@@ -1822,12 +1804,12 @@ getQuasarWhereClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTabl
         /*
          * Quasar doesn't support CAST
          */
-        elog(DEBUG2, "getQuasarWhereClause: T_CoerceViaIO");
+        elog(DEBUG2, "getQuasarClause: T_CoerceViaIO");
         return NULL;
         break;
     default:
         /* we cannot translate this to Quasar */
-        elog(DEBUG2, "getQuasarWhereClause: Other: %d", expr->type);
+        elog(DEBUG2, "getQuasarClause: Other: %d", expr->type);
         return NULL;
     }
 

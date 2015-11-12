@@ -107,7 +107,7 @@ And to test:
 make install installcheck
 ```
 
-### Adding operators
+### Adding more pushdown features
 
 If [quasar](https://github.com/quasar-analytics/quasar) adds operators, it would be good to update this FDW to support pushdown of that operator. This can be done in a few places:
 
