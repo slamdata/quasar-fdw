@@ -136,3 +136,12 @@ SELECT * FROM commits LIMIT 5;
  Wed Jan 28 16:27:52 2015 | 3d44ce48fc0670aaf39ba1acd0e1c161f14cc2d6 | Greg Pfeil    | greg@technomadic.org                  | https://api.github.com/repos/slamdata/slamengine/commits/3d44ce48fc0670aaf39ba1acd0e1c161f14cc2d6 |             0
 (5 rows)
 
+/* convert year as string to integers floats and dates */
+SELECT yr, yearint, yearfloat FROM olympics WHERE "yr" = '1924' LIMIT 3;
+  yr  | yearint | yearfloat 
+------+---------+-----------
+ 1924 |    1924 |      1924
+ 1924 |    1924 |      1924
+ 1924 |    1924 |      1924
+(3 rows)
+
