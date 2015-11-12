@@ -111,8 +111,6 @@ make install installcheck
 
 This project was based on a skeleton FDW from [blackhole_fdw](https://bitbucket.org/adunstan/blackhole_fdw)
 
-The download method for this fdw is based on the [s3_fdw](https://github.com/umitanuki/s3_fdw).
-
 Quasar is a project created by [SlamData](http://slamdata.com).
 
 This fdw uses [libcurl](http://curl.haxx.se/libcurl/).
