@@ -235,6 +235,7 @@ quasarGetForeignRelSize(PlannerInfo *root,
       struct QuasarTable *qTable = getQuasarTable(foreigntableid, opt);
       createQuery(baserel, qTable, fdwState);
       fdwState->quasarTable = qTable;
+      fdwState->timeout_ms = opt->timeout_ms;
       elog(DEBUG1, "quasar_fdw: query is %s", fdwState->query);
 }
 
@@ -404,6 +405,7 @@ quasarBeginForeignScan(ForeignScanState *node,
       /* Setup curl */
       curl = festate->curl = curl_easy_init();
       festate->curlm = curl_multi_init();
+      festate->timeout_ms = plan->timeout_ms;
 
       /* Fetch options of foreign table */
       opt = quasar_get_options(RelationGetRelid(node->ss.ss_currentRelation));
@@ -518,7 +520,7 @@ quasarIterateForeignScan(ForeignScanState *node)
     bool finished_transfer = false;
     int cc;
     clock_t time;
-    long timeout_ms = DEFAULT_CURL_TIMEOUT_MS;
+    long timeout_ms = festate->timeout_ms;
 
     /*
      * The protocol for loading a virtual tuple into a slot is first
@@ -536,7 +538,7 @@ quasarIterateForeignScan(ForeignScanState *node)
         /* Pull down more data when we don't have data */
         if (festate->ongoing_transfers == 1
             && festate->buffer_offset == festate->curl_ctx->buffer.len) {
-            elog(DEBUG2, "quasar_fdw: continuing curl transfer");
+            elog(DEBUG2, "quasar_fdw: continuing curl transfer (timeout_ms %ld)", timeout_ms);
             time = clock();
 
             /* Basically select() on curl's internal fds */
@@ -740,7 +742,8 @@ body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
  */
 List *serializePlanState(struct QuasarFdwPlanState *fdwState) {
     int i;
-    List *l = list_make1(makeString(fdwState->query));
+    List *l = list_make2(makeString(fdwState->query),
+                         makeInteger(fdwState->timeout_ms));
 
     l = lappend(l, makeString(fdwState->quasarTable->name));
     l = lappend(l, makeString(fdwState->quasarTable->pgname));
@@ -759,6 +762,8 @@ List *serializePlanState(struct QuasarFdwPlanState *fdwState) {
     return l;
 }
 
+#define lcpop(fld) ((Value*)lfirst(lc))->val.fld; lc = lnext(lc)
+
 /* deserializePlanState
  * deserialize a list into a plan state
  *
@@ -771,17 +776,11 @@ struct QuasarFdwPlanState *deserializePlanState(List *l) {
     struct QuasarFdwPlanState *state = palloc0(sizeof(struct QuasarFdwPlanState));
     state->quasarTable = palloc0(sizeof(struct QuasarTable));
 
-    state->query = ((Value*)lfirst(lc))->val.str;
-    lc = lnext(lc);
-
-    state->quasarTable->name = ((Value*)lfirst(lc))->val.str;
-    lc = lnext(lc);
-
-    state->quasarTable->pgname = ((Value*)lfirst(lc))->val.str;
-    lc = lnext(lc);
-
-    state->quasarTable->ncols = ((Value*)lfirst(lc))->val.ival;
-    lc = lnext(lc);
+    state->query = lcpop(str);
+    state->timeout_ms = lcpop(ival);
+    state->quasarTable->name = lcpop(str);
+    state->quasarTable->pgname = lcpop(str);
+    state->quasarTable->ncols = lcpop(ival);
 
     state->quasarTable->cols = palloc0(state->quasarTable->ncols *
                                        sizeof(struct QuasarColumn *));
@@ -789,26 +788,13 @@ struct QuasarFdwPlanState *deserializePlanState(List *l) {
         struct QuasarColumn *col = palloc0(sizeof(struct QuasarColumn));
         state->quasarTable->cols[i] = col;
 
-        col->name = ((Value*)lfirst(lc))->val.str;
-        lc = lnext(lc);
-
-        col->pgname = ((Value*)lfirst(lc))->val.str;
-        lc = lnext(lc);
-
-        col->pgattnum = ((Value*)lfirst(lc))->val.ival;
-        lc = lnext(lc);
-
-        col->pgtype = (Oid) ((Value*)lfirst(lc))->val.ival;
-        lc = lnext(lc);
-
-        col->pgtypmod = ((Value*)lfirst(lc))->val.ival;
-        lc = lnext(lc);
-
-        col->arrdims = ((Value*)lfirst(lc))->val.ival;
-        lc = lnext(lc);
-
-        col->used = ((Value*)lfirst(lc))->val.ival;
-        lc = lnext(lc);
+        col->name = lcpop(str);
+        col->pgname = lcpop(str);
+        col->pgattnum = lcpop(ival);
+        col->pgtype = (Oid) lcpop(ival);
+        col->pgtypmod = lcpop(ival);
+        col->arrdims = lcpop(ival);
+        col->used = lcpop(ival);
 
         /* Fill out typinput and typioparam fields */
         Oid in_func_oid;

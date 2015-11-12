@@ -68,6 +68,7 @@ static struct QuasarFdwOption valid_options[] =
     /* Available options for CREATE SERVER */
     { "server",  ForeignServerRelationId },
     { "path",    ForeignServerRelationId },
+    { "timeout_ms", ForeignServerRelationId },
     /* Available options for CREATE FOREIGN TABLE */
     { "table",   ForeignTableRelationId },
     /* Available options for columns inside CREATE FOREIGN TABLE */
@@ -188,6 +189,7 @@ QuasarOpt* quasar_get_options(Oid foreignoid) {
     /* Defaults */
     opt->server = DEFAULT_SERVER;
     opt->path = DEFAULT_PATH;
+    opt->timeout_ms = DEFAULT_CURL_TIMEOUT_MS;
 
     /* Loop through the options, and get the server/port */
     foreach(lc, options)
@@ -198,8 +200,14 @@ QuasarOpt* quasar_get_options(Oid foreignoid) {
             opt->server = defGetString(def);
         else if (strcmp(def->defname, "path") == 0)
             opt->path = defGetString(def);
+        else if (strcmp(def->defname, "timeout_ms") == 0)
+            opt->timeout_ms = atol(defGetString(def));
         else if (strcmp(def->defname, "table") == 0)
             opt->table = defGetString(def);
+    }
+
+    if (opt->timeout_ms <= 0) {
+        elog(ERROR, "Option timeout_ms requires a positive value");
     }
 
     return opt;

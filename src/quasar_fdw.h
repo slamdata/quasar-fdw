@@ -38,6 +38,7 @@ typedef struct QuasarOpt
     char *server; /* Quasar http url */
     char *path;   /* Quasar fs path */
     char *table;  /* Quasar table name */
+    long  timeout_ms; /* Timeout talking to quasar */
 } QuasarOpt;
 
 
@@ -88,6 +89,8 @@ typedef struct QuasarFdwPlanState
 
     /* Representation of the table we are querying */
     struct QuasarTable *quasarTable;
+
+    long timeout_ms; /* Passing through to ExecState */
 } QuasarFdwPlanState;
 
 
@@ -109,6 +112,7 @@ typedef struct quasar_curl_context {
 typedef struct QuasarFdwExecState
 {
     char * url; /* for rescans */
+    long timeout_ms; /* curl request timeout */
 
     CURLM *curlm;                    /* curl multi handle */
     CURL *curl;                      /* current transfer handle */

@@ -15,6 +15,7 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 - Tested some more functions like string concat
 - Test array expansion in queries
 - Switch to curl_multi interface to stream data without forked processes and without buffering all request data before processing it.
+- Add timeout_ms option
 
 11/10/2015:
 - I patched the json parser to have a reset feature so I didn't have to allocate every iteration. Interestingly, the parser lazy-allocates its lexer, which causes issues on the second iteration because each iteration is in a short-lived memory context. I had to force an allocation with `yajl_parse(handle, NULL, 0)` in the `BeginForeignScan` function in order to fix it.
@@ -78,7 +79,9 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 ```sql
 CREATE SERVER quasar
     FOREIGN DATA WRAPPER quasar_fdw
-    OPTIONS (server 'http://localhost:8080', path '/local/quasar');
+    OPTIONS (server 'http://localhost:8080'
+            ,path '/local/quasar'
+            ,timeout_ms 1000);
 
 CREATE FOREIGN TABLE zips(city varchar, loc float[2], pop integer, state char(2))
     SERVER quasar
