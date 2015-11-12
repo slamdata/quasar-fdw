@@ -101,6 +101,8 @@ SELECT city FROM zips LIMIT 3;
 
 - If one of your fields uses a quasar-reserved word (such as `date`, you must quote the field using an attribute option: `OPTIONS (map 'comment."date"')`
 - Postgres will downcase all field names, so if a field has a capital letter in it, you must use the map option: `OPTIONS (map "camelCaseSensitive")`
+- This FDW will convert strings to other types, such as dates, times, timestamps, intervals, integers, and floats. However, if the underlying data is a string, you cannot push down type-specific operations such as WHERE clauses to Quasar by default. Therefore, you can enforce a no pushdown restriction in the column options. Use the `OPTIONS (nopushdown 'true')` option to force no pushdown of any clause containing the column.
+
 
 
 ## Development
@@ -135,14 +137,22 @@ If [quasar](https://github.com/quasar-analytics/quasar) adds operators, it would
   - if the function needs to be transformed, do it at `/* FUNCTION TRANSFORMS */`
 - For more complicated things like ANY, CASE, NULLIF, etc, you'll have to find the correct case in the big switch statement in `getQuasarClause` and write the appropriate code to put the correct statement into `result`. Check out other cases to see what to do.
 
-## License
+## Legal
 
-????
+Copyright &copy; 2015 SlamData Inc.
 
-## Attribution
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-This project was based on a skeleton FDW from [blackhole_fdw](https://bitbucket.org/adunstan/blackhole_fdw)
+    http://www.apache.org/licenses/LICENSE-2.0
 
-Quasar is a project created by [SlamData](http://slamdata.com).
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 
-This fdw uses [libcurl](http://curl.haxx.se/libcurl/).
+### Contributors
+
+Contributors to the project must agree to the [Contributor License Agreement](CLA.md).
