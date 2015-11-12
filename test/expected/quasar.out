@@ -109,6 +109,7 @@ SELECT missing, city FROM zips_missing LIMIT 3;
 
 /* query with a bad type */
 SELECT loc FROM zips_bad LIMIT 1;
+WARNING:  quasar_fdw: column loc is scalar type but got json/array response.
  loc 
 -----
     
@@ -117,10 +118,21 @@ SELECT loc FROM zips_bad LIMIT 1;
 /* Make quasar_fdw convert a float to integer
  * Quasar converts pop to a float and we convert it back */
 SELECT pop, loc0 FROM zips_convert WHERE loc0 < -70 LIMIT 3;
-  pop  |    loc0    
--------+------------
- 15338 | -72.622739
- 36963 |  -72.51565
-  4546 | -72.108354
+  pop  | loc0 
+-------+------
+ 15338 |     
+ 36963 |     
+  4546 |     
 (3 rows)
+
+/* convert string timestamps to timestamp values */
+SELECT * FROM commits LIMIT 5;
+            ts            |                   sha                    |  author_name  |             author_email              |                                                url                                                | comment_count 
+--------------------------+------------------------------------------+---------------+---------------------------------------+---------------------------------------------------------------------------------------------------+---------------
+ Thu Jan 29 15:52:37 2015 | b8a2302e6a0659875d03bfe4988c000f2ed027a0 | Greg Pfeil    | greg@technomadic.org                  | https://api.github.com/repos/slamdata/slamengine/commits/b8a2302e6a0659875d03bfe4988c000f2ed027a0 |             0
+ Thu Jan 29 00:23:14 2015 | 18164870e8803e5885a88f8dfd53b82c80721503 | Moss Prescott | moss@theprescotts.com                 | https://api.github.com/repos/slamdata/slamengine/commits/18164870e8803e5885a88f8dfd53b82c80721503 |             0
+ Wed Jan 28 17:06:29 2015 | b29d8f254e5df2c4d1792f077625924cd1fde2db | Moss Prescott | moss@theprescotts.com                 | https://api.github.com/repos/slamdata/slamengine/commits/b29d8f254e5df2c4d1792f077625924cd1fde2db |             0
+ Wed Jan 28 16:20:27 2015 | 53d2e5684d9403194dff1cc63423c2590038d1c0 | Moss Prescott | mossprescott@users.noreply.github.com | https://api.github.com/repos/slamdata/slamengine/commits/53d2e5684d9403194dff1cc63423c2590038d1c0 |             0
+ Wed Jan 28 16:27:52 2015 | 3d44ce48fc0670aaf39ba1acd0e1c161f14cc2d6 | Greg Pfeil    | greg@technomadic.org                  | https://api.github.com/repos/slamdata/slamengine/commits/3d44ce48fc0670aaf39ba1acd0e1c161f14cc2d6 |             0
+(5 rows)
 

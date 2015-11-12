@@ -17,3 +17,11 @@ CREATE FOREIGN TABLE zips_bad(loc float) -- BAD Field type
        SERVER quasar OPTIONS (table 'smallZips');
 CREATE FOREIGN TABLE zips_convert(pop integer, loc0 float OPTIONS (map 'loc[0]'))
        SERVER quasar OPTIONS (table 'smallZips');
+CREATE FOREIGN TABLE commits
+       (ts timestamp OPTIONS (map 'commit.author.date')
+       ,sha varchar
+       ,author_name varchar OPTIONS (map 'commit.author.name')
+       ,author_email varchar OPTIONS (map 'commit.author.email')
+       ,url varchar
+       ,comment_count integer OPTIONS (map 'commit.comment_count'))
+       SERVER quasar OPTIONS (table 'slamengine_commits');

@@ -30,3 +30,5 @@ SELECT loc FROM zips_bad LIMIT 1;
 /* Make quasar_fdw convert a float to integer
  * Quasar converts pop to a float and we convert it back */
 SELECT pop, loc0 FROM zips_convert WHERE loc0 < -70 LIMIT 3;
+/* convert string timestamps to timestamp values */
+SELECT * FROM commits LIMIT 5;
