@@ -14,6 +14,7 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 - Figured out a weird thing, if a date is string in underlying data and the schema calls it a date, we could try to pushdown a WHERE clause on the date, but quasar wouldn't be able to handle it. As such I added a new option on attributes called `nopushdown`, which will abandon pushing down any WHERE clause to quasar containing that column.
 - Tested some more functions like string concat
 - Test array expansion in queries
+- Switch to curl_multi interface to stream data without forked processes and without buffering all request data before processing it.
 
 11/10/2015:
 - I patched the json parser to have a reset feature so I didn't have to allocate every iteration. Interestingly, the parser lazy-allocates its lexer, which causes issues on the second iteration because each iteration is in a short-lived memory context. I had to force an allocation with `yajl_parse(handle, NULL, 0)` in the `BeginForeignScan` function in order to fix it.

@@ -24,8 +24,10 @@
 #include "utils/rel.h"
 
 #include "yajl/yajl_parse.h"
+#include <curl/curl.h>
 
 #define BUF_SIZE 65536
+#define DEFAULT_CURL_TIMEOUT_MS 1000
 
 /*
  * Options structure to store the Quasar
@@ -95,25 +97,29 @@ typedef struct quasar_parse_context
     void *p;
 } quasar_parse_context;
 
+typedef struct quasar_curl_context {
+    int status;
+    StringInfoData buffer;
+} quasar_curl_context;
+
 /*
  * FDW-specific information for ForeignScanState
  * fdw_state.
  */
 typedef struct QuasarFdwExecState
 {
-    /* for rescans */
-    char * url;
-    /* for saving the buffer of raw curl data */
-    char * buffer;
-    size_t buf_loc;
-    size_t buf_size;
+    char * url; /* for rescans */
+
+    CURLM *curlm;                    /* curl multi handle */
+    CURL *curl;                      /* current transfer handle */
+    int ongoing_transfers;           /* 1 if transfer still ongoing, 0 otherwise */
+
+    quasar_curl_context *curl_ctx;   /* For buffering input data */
+    size_t buffer_offset;            /* For reading bufferred input data */
+
     quasar_parse_context *parse_ctx; /* for parsing the data */
 } QuasarFdwExecState;
 
-typedef struct quasar_curl_context {
-    int status;
-    StringInfoData buffer;
-} quasar_curl_context;
 
 /* quasar_options.c headers */
 extern Datum quasar_fdw_validator(PG_FUNCTION_ARGS);

@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <yajl/yajl_parse.h>
 
 #include "postgres.h"
@@ -130,7 +131,8 @@ static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es);
 /*
  * Curl functions
  */
-void execute_curl(CURL *curl, struct QuasarFdwExecState *festate);
+void cleanup_curl(struct QuasarFdwExecState *festate);
+void execute_curl(struct QuasarFdwExecState *festate);
 static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf);
 static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 
@@ -393,11 +395,15 @@ quasarBeginForeignScan(ForeignScanState *node,
       ListCell *cell;
       int index;
       struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
-      CURL *curl = curl_easy_init();
+      CURL *curl;
 
       festate = (QuasarFdwExecState *) palloc0(sizeof(QuasarFdwExecState));
       festate->parse_ctx = palloc0(sizeof(quasar_parse_context));
       quasar_parse_alloc(festate->parse_ctx, plan->quasarTable);
+
+      /* Setup curl */
+      curl = festate->curl = curl_easy_init();
+      festate->curlm = curl_multi_init();
 
       /* Fetch options of foreign table */
       opt = quasar_get_options(RelationGetRelid(node->ss.ss_currentRelation));
@@ -471,8 +477,7 @@ quasarBeginForeignScan(ForeignScanState *node,
       pfree(plan);
 
       /* Execute the curl */
-      execute_curl(curl, festate);
-      curl_easy_cleanup(curl);
+      execute_curl(festate);
 
       node->fdw_state = (void *) festate;
 }
@@ -509,8 +514,11 @@ quasarIterateForeignScan(ForeignScanState *node)
 
     QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
     TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-
-    /* TODO add error context */
+    int nfds;
+    bool finished_transfer = false;
+    int cc;
+    clock_t time;
+    long timeout_ms = DEFAULT_CURL_TIMEOUT_MS;
 
     /*
      * The protocol for loading a virtual tuple into a slot is first
@@ -519,19 +527,61 @@ quasarIterateForeignScan(ForeignScanState *node)
      * just skip the last step, leaving the slot empty as required.
      *
      */
+
     ExecClearTuple(slot);
     quasar_parse_set_slot(festate->parse_ctx, slot);
 
-    if (festate->buf_loc < festate->buf_size) {
-        /* Parse a row and store it if we find one */
-        if (quasar_parse(festate->parse_ctx,
-                         festate->buffer,
-                         &festate->buf_loc,
-                         festate->buf_size)) {
-            ExecStoreVirtualTuple(slot);
+
+    /* Continue the curl operation until we have data */
+    for (;;) {
+        if (festate->ongoing_transfers == 1) {
+            elog(DEBUG2, "quasar_fdw: continuing curl transfer");
+            time = clock();
+
+            /* Basically select() on curl's internal fds */
+            cc = curl_multi_wait(festate->curlm, NULL, 0, timeout_ms, &nfds);
+            if (cc != CURLM_OK) {
+                cleanup_curl(festate);
+                elog(ERROR, "quasar_fdw: curl error %s", curl_multi_strerror(cc));
+            }
+
+            /* If nothing happened in timeout (after a first perform),
+               error out */
+            if ((clock() - time) / CLOCKS_PER_SEC * 1000 >= timeout_ms
+                && nfds == 0) {
+                cleanup_curl(festate);
+                elog(ERROR, "quasar_fdw: Timeout (%ld ms) contacting quasar.", timeout_ms);
+            }
+
+            /* Execute any necessary work for the request */
+            cc = curl_multi_perform(festate->curlm, &festate->ongoing_transfers);
+            if (cc != CURLM_OK) {
+                cleanup_curl(festate);
+                elog(ERROR, "quasar_fdw: curl error %s", curl_multi_strerror(cc));
+            }
+        } else if (finished_transfer) {
+            /* If we have finished the transfer and tried to parse another row
+             * but failed to find a tuple, we know that there are no more. */
+            return slot;
+        } else {
+            finished_transfer = true;
         }
+
+        /* Parse any new buffer available */
+        if (festate->buffer_offset < festate->curl_ctx->buffer.len) {
+            /* Parse a row and store it if we find one */
+            if (quasar_parse(festate->parse_ctx,
+                             festate->curl_ctx->buffer.data,
+                             &festate->buffer_offset,
+                             festate->curl_ctx->buffer.len)) {
+                ExecStoreVirtualTuple(slot);
+                return slot;
+            }
+        }
+
     }
 
+    /* Shouldn't get here */
     return slot;
 }
 
@@ -551,9 +601,12 @@ quasarEndForeignScan(ForeignScanState *node)
       QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
       /* if festate is NULL, we are in EXPLAIN; nothing to do */
       if (festate) {
+          cleanup_curl(festate);
+
           quasar_parse_free(festate->parse_ctx);
           pfree(festate->parse_ctx);
-          pfree(festate->buffer);
+          pfree(festate->curl_ctx->buffer.data);
+          pfree(festate->curl_ctx);
           pfree(festate->url);
           pfree(festate);
       }
@@ -570,10 +623,14 @@ quasarEndForeignScan(ForeignScanState *node)
     elog(DEBUG1, "entering function %s", __func__);
     QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
 
-    CURL *curl = curl_easy_init();
-    execute_curl(curl, festate);
-    curl_easy_cleanup(curl);
-}
+    /* Stop current request */
+    curl_multi_remove_handle(festate->curlm, festate->curl);
+    curl_easy_cleanup(festate->curl);
+
+    /* Start a new request */
+    festate->curl = curl_easy_init();
+    execute_curl(festate);
+ }
 
 
 /*
@@ -592,35 +649,46 @@ static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es) {
     ExplainPropertyText("Quasar query", plan->query, es);
 }
 
+void cleanup_curl(struct QuasarFdwExecState *festate) {
+    curl_multi_remove_handle(festate->curlm, festate->curl);
+    curl_easy_cleanup(festate->curl);
+    curl_multi_cleanup(festate->curlm);
+}
+
 void
-execute_curl(CURL *curl, struct QuasarFdwExecState *festate) {
-    quasar_curl_context ctx;
+execute_curl(struct QuasarFdwExecState *festate) {
     int sc;
+    CURL *curl = festate->curl;
+    CURLM *curlm = festate->curlm;
+
+    if (festate->curl_ctx == NULL) {
+        festate->curl_ctx = palloc0(sizeof(quasar_curl_context));
+        initStringInfo(&festate->curl_ctx->buffer);
+    } else {
+        festate->curl_ctx->status = 0;
+        resetStringInfo(&festate->curl_ctx->buffer);
+    }
 
     /* Set up CURL instance. */
     curl_easy_setopt(curl, CURLOPT_URL, festate->url);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, festate->curl_ctx);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_handler);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, festate->curl_ctx);
 
     elog(DEBUG1, "curling %s", festate->url);
-    sc = curl_easy_perform(curl);
-    if (sc != 0)
-    {
-        curl_easy_cleanup(curl); /* Cleanup before exception */
+    sc = curl_multi_add_handle(curlm, curl);
+    if (sc != 0) {
+        /* Cleanup before exception */
+        cleanup_curl(festate);
         elog(ERROR, "curl %s failed: %d", festate->url, sc);
     }
 
-    if (ctx.status != 200) {
-        curl_easy_cleanup(curl); /* Cleanup before exception */
-        elog(ERROR, "bad output from Quasar: %s. Status code: %d", festate->url, ctx.status);
-    }
+    festate->buffer_offset = 0;
+    festate->ongoing_transfers = 1;
 
-    festate->buffer = ctx.buffer.data;
-    festate->buf_loc = 0;
-    festate->buf_size = ctx.buffer.len;
+    /* Reset the parse context (for rescans) */
     quasar_parse_reset(festate->parse_ctx);
 }
 
@@ -643,10 +711,6 @@ header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
         status = atoi((char *) buffer + strlen(HTTP_1_1) + 1);
         elog(DEBUG1, "curl response status %d", status);
         ctx->status = status;
-
-        if (status == 200) {     /* if success */
-            initStringInfo(&ctx->buffer);
-        }
     }
 
     return segsize;
