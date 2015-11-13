@@ -87,6 +87,13 @@ typedef struct QuasarFdwPlanState
     /* Bools representing which clauses have been fully pushed down to Quasar */
     bool *pushdown_clauses;
 
+    /* List of pathkeys to use in this query.
+     * Pathkeys are sort-order instructions
+     * Created by createQuery
+     * Passed to PG via GetForeignRelPaths
+     */
+    List *pathkeys;
+
     /* Representation of the table we are querying */
     struct QuasarTable *quasarTable;
 

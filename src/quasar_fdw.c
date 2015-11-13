@@ -139,14 +139,14 @@ static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 /*
  * Private functions
  */
-void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan);
+void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan);
 struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt);
 void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable);
 char *getQuasarClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params);
 List *serializePlanState(struct QuasarFdwPlanState *fdwState);
 struct QuasarFdwPlanState *deserializePlanState(List *l);
 static char *datumToString(Datum datum, Oid type);
-
+Expr *find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel);
 
 /*
  * _PG_init
@@ -219,24 +219,24 @@ quasarGetForeignRelSize(PlannerInfo *root,
        * can compute a better estimate of the average result row width.
        */
 
-      QuasarFdwPlanState *fdwState;
+      QuasarFdwPlanState *fdwPlan;
 
       elog(DEBUG1, "entering function %s", __func__);
 
       baserel->rows = 0;
 
-      fdwState = palloc0(sizeof(QuasarFdwPlanState));
-      baserel->fdw_private = (void *) fdwState;
-      fdwState->params = NIL;
+      fdwPlan = palloc0(sizeof(QuasarFdwPlanState));
+      baserel->fdw_private = (void *) fdwPlan;
+      fdwPlan->params = NIL;
 
       /* initialize required state in fdw_private */
 
       QuasarOpt *opt = quasar_get_options(foreigntableid);
       struct QuasarTable *qTable = getQuasarTable(foreigntableid, opt);
-      createQuery(baserel, qTable, fdwState);
-      fdwState->quasarTable = qTable;
-      fdwState->timeout_ms = opt->timeout_ms;
-      elog(DEBUG1, "quasar_fdw: query is %s", fdwState->query);
+      createQuery(root, baserel, qTable, fdwPlan);
+      fdwPlan->quasarTable = qTable;
+      fdwPlan->timeout_ms = opt->timeout_ms;
+      elog(DEBUG1, "quasar_fdw: query is %s", fdwPlan->query);
 }
 
 static void
@@ -259,16 +259,18 @@ quasarGetForeignPaths(PlannerInfo *root,
        * that is needed to identify the specific scan method intended.
        */
 
-      /*
-       * QuasarFdwPlanState *fdw_private = baserel->fdw_private;
-       */
+      QuasarFdwPlanState *fdwPlan = baserel->fdw_private;
 
       Cost startup_cost, total_cost;
 
       elog(DEBUG1, "entering function %s", __func__);
 
       startup_cost = 100;
-      total_cost = startup_cost + baserel->rows;
+      total_cost = startup_cost;
+
+      elog(DEBUG1, "join length %d", list_length(baserel->joininfo));
+      elog(DEBUG1, "query pathkeys %d", list_length(root->query_pathkeys));
+
 
       /* Create a ForeignPath node and add it as only possible path */
       add_path(baserel, (Path *)
@@ -276,7 +278,7 @@ quasarGetForeignPaths(PlannerInfo *root,
                                        baserel->rows,
                                        startup_cost,
                                        total_cost,
-                                       NIL,       /* no pathkeys */
+                                       fdwPlan->pathkeys,
                                        NULL,            /* no outer rel either */
                                        NIL));           /* no fdw_private data */
 }
@@ -538,7 +540,7 @@ quasarIterateForeignScan(ForeignScanState *node)
         /* Pull down more data when we don't have data */
         if (festate->ongoing_transfers == 1
             && festate->buffer_offset == festate->curl_ctx->buffer.len) {
-            elog(DEBUG2, "quasar_fdw: continuing curl transfer (timeout_ms %ld)", timeout_ms);
+            elog(DEBUG3, "quasar_fdw: continuing curl transfer (timeout_ms %ld)", timeout_ms);
             time = clock();
 
             /* Basically select() on curl's internal fds */
@@ -894,18 +896,19 @@ struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
  *      that will be pushed down and "false" for those that are filtered locally.
  *      As a side effect, we also mark the used columns in quasarTable.
  */
-void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan)
+void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan)
 {
     ListCell *cell;
     bool first_col = true, in_quote = false;
     int i, clause_count = -1, index;
     StringInfoData query;
-    char *where, *wherecopy, parname[10], *p;
+    char *where, parname[10], *p;
     List *columnlist = foreignrel->reltargetlist,
         *conditions = foreignrel->baserestrictinfo;
     struct QuasarColumn *col;
     List **params = &plan->params;
     bool **pushdown_clauses = &plan->pushdown_clauses;
+    List **usable_pathkeys = &plan->pathkeys;
 
     elog(DEBUG1, "entering function %s", __func__);
 
@@ -944,6 +947,7 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
             }
         }
     }
+
     /* dummy column if there is no result column we need from Quasar */
     if (first_col)
         appendStringInfo(&query, "'1'");
@@ -981,11 +985,61 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
             (*pushdown_clauses)[++clause_count] = false;
     }
 
+    /*
+     * Push down ORDER BY and other sort clauses, known as "pathkeys" to Postgres
+     * This will avoid a local sort in PG.
+     */
+
+    StringInfoData orderby;
+    initStringInfo(&orderby);
+    first_col = true;
+    foreach(cell, root->query_pathkeys) {
+        PathKey    *pathkey = (PathKey *) lfirst(cell);
+        EquivalenceClass *pathkey_ec = pathkey->pk_eclass;
+        Expr       *em_expr;
+        char *querypart = NULL;
+
+        elog(DEBUG1, "Checking query_pathkey");
+
+        /*
+         * getQuasarClause would detect volatile expressions as well, but
+         * ec_has_volatile saves some cycles.
+         */
+        if (!pathkey_ec->ec_has_volatile) {
+            em_expr = find_em_expr_for_rel(pathkey_ec, foreignrel);
+            if (em_expr) {
+                querypart = getQuasarClause(foreignrel, em_expr, quasarTable, params);
+            }
+        }
+
+        if (querypart != NULL) {
+            if (!first_col) appendStringInfoChar(&orderby, ',');
+            first_col = false;
+            appendStringInfo(&orderby, "%s", querypart);
+            *usable_pathkeys = lappend(*usable_pathkeys, pathkey);
+        } else {
+            /*
+             * The planner and executor don't have any clever strategy for
+             * taking data sorted by a prefix of the query's pathkeys and
+             * getting it to be sorted by all of those pathekeys.  We'll just
+             * end up resorting the entire data set.  So, unless we can push
+             * down all of the query pathkeys, forget it.
+             */
+            list_free(*usable_pathkeys);
+            *usable_pathkeys = NIL;
+            resetStringInfo(&orderby);
+            break;
+        }
+    }
+    if (*usable_pathkeys != NIL) {
+        appendStringInfo(&query, " ORDER BY %s", orderby.data);
+    }
+    pfree(orderby.data);
+
     plan->query = pstrdup(query.data);
 
-    /* get a copy of the where clause without single quoted string literals */
-    wherecopy = query.data;
-    for (p=wherecopy; *p!='\0'; ++p)
+    /* Remove string literals from this copy of the query */
+    for (p=query.data; *p!='\0'; ++p)
     {
         if (*p == '\'')
             in_quote = ! in_quote;
@@ -999,7 +1053,7 @@ void createQuery(RelOptInfo *foreignrel, struct QuasarTable *quasarTable, Quasar
     {
         ++index;
         snprintf(parname, 10, ":p%d", index);
-        if (strstr(wherecopy, parname) == NULL)
+        if (strstr(query.data, parname) == NULL)
         {
             /* set the element to NULL to indicate it's gone */
             lfirst(cell) = NULL;
@@ -1867,4 +1921,31 @@ getQuasarClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *qu
     }
 
     return result.data;
+}
+
+/*
+ * Find an equivalence class member expression, all of whose Vars, come from
+ * the indicated relation.
+ */
+Expr *find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel)
+{
+    ListCell   *lc_em;
+
+    foreach(lc_em, ec->ec_members)
+    {
+        EquivalenceMember *em = lfirst(lc_em);
+
+        if (bms_equal(em->em_relids, rel->relids))
+        {
+            /*
+             * If there is more than one equivalence member whose Vars are
+             * taken entirely from this relation, we'll be content to choose
+             * any one of those.
+             */
+            return em->em_expr;
+        }
+    }
+
+    /* We didn't find any suitable equivalence class expression */
+    return NULL;
 }

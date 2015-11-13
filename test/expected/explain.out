@@ -158,3 +158,21 @@ EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '
    Quasar query: SELECT city, pop, state FROM smallZips
 (3 rows)
 
+/* ORDER BY pushdown */
+EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY length(city), -pop, state;
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Foreign Scan on zips
+   Quasar query: SELECT city, pop, state FROM zips ORDER BY length(city),(-pop),state
+(2 rows)
+
+/* If one ORDER BY column can't be pushed down, none are */
+EXPLAIN (COSTS off) SELECT * FROM commits ORDER BY ts, sha;
+                                                                                                QUERY PLAN                                                                                                
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort
+   Sort Key: ts, sha
+   ->  Foreign Scan on commits
+         Quasar query: SELECT commit.author."date" AS ts, sha, commit.author.name AS author_name, commit.author.email AS author_email, url, commit.comment_count AS comment_count FROM slamengine_commits
+(4 rows)
+

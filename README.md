@@ -2,7 +2,13 @@
 
 This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analytics/quasar).
 
+
+The main advantage of using this FDW over alternatives is that it takes full advantage of the Quasar query engine by "pushing down" as many clauses from the PostgreSQL query to Quasar as possible. This includes WHERE, ORDER BY, and JOIN clauses.
+
 ## WIP Status
+
+11/13/2015:
+- Even though [SQL/MED](https://wiki.postgresql.org/wiki/SQL/MED) claims ORDER BY clauses can't be pushed down, they can! I just got that to work.
 
 11/11/2015:
 - Tell postgres to not execute WHERE filters when we are pushing a WHERE filter down.
@@ -102,8 +108,6 @@ SELECT city FROM zips LIMIT 3;
 - If one of your fields uses a quasar-reserved word (such as `date`, you must quote the field using an attribute option: `OPTIONS (map 'comment."date"')`
 - Postgres will downcase all field names, so if a field has a capital letter in it, you must use the map option: `OPTIONS (map "camelCaseSensitive")`
 - This FDW will convert strings to other types, such as dates, times, timestamps, intervals, integers, and floats. However, if the underlying data is a string, you cannot push down type-specific operations such as WHERE clauses to Quasar by default. Therefore, you can enforce a no pushdown restriction in the column options. Use the `OPTIONS (nopushdown 'true')` option to force no pushdown of any clause containing the column.
-
-
 
 ## Development
 

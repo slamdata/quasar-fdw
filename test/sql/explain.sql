@@ -34,3 +34,7 @@ EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 
                                             AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
 /* LIKE operator only supports constant right sides */
 EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);
+/* ORDER BY pushdown */
+EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY length(city), -pop, state;
+/* If one ORDER BY column can't be pushed down, none are */
+EXPLAIN (COSTS off) SELECT * FROM commits ORDER BY ts, sha;

@@ -44,3 +44,5 @@ SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);
 /* array expansion */
 SELECT * FROM user_comments;
 SELECT * FROM nested_expansion;
+/* ORDER BY pushdown */
+SELECT * FROM zips ORDER BY length(city), -pop, state LIMIT 10;

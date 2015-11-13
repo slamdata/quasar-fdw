@@ -186,3 +186,19 @@ SELECT * FROM nested_expansion;
     9 | {"midArr":[[10,11,12],{"a":"j","b":"k","c":"l"}],"midObj":{"botArr":[13,14,15],"botObj":{"a":"m","b":"n","c":"o"}}}
 (3 rows)
 
+/* ORDER BY pushdown */
+SELECT * FROM zips ORDER BY length(city), -pop, state LIMIT 10;
+ city |  pop  | state 
+------+-------+-------
+ M M  | 32901 | GA
+ ADA  | 24967 | OK
+ ROY  | 22166 | UT
+ ORA  | 21437 | SC
+ RYE  | 16479 | NY
+ LEE  | 15487 | NH
+ ORA  |  9987 | SC
+ OPP  |  9901 | AL
+ ADA  |  9568 | MI
+ YOE  |  8691 | PA
+(10 rows)
+
