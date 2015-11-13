@@ -1,0 +1,1517 @@
+/*-------------------------------------------------------------------------
+ *
+ * Quasar Foreign Data Wrapper for PostgreSQL
+ *
+ * Copyright (c) 2015 SlamData
+ *
+ * This software is released under the PostgreSQL Licence
+ *
+ * Author: Jon Eisen <jon@joneisen.works>
+ *
+ * IDENTIFICATION
+ *            quasar_fdw/src/quasar_query.h
+ *
+ * Query deparser for quasar_fdw
+ *
+ * This file includes functions that examine query WHERE clauses to see
+ * whether they're safe to send to the remote server for execution, as
+ * well as functions to construct the query text to be sent.
+ * One saving grace is that we only need deparse logic for node types that
+ * we consider safe to send.
+ *
+ *-------------------------------------------------------------------------
+ */
+#include "postgres.h"
+
+#include "quasar_fdw.h"
+
+#include "access/heapam.h"
+#include "access/htup_details.h"
+#include "access/sysattr.h"
+#include "catalog/pg_collation.h"
+#include "catalog/pg_namespace.h"
+#include "catalog/pg_operator.h"
+#include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
+#include "commands/defrem.h"
+#include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
+#include "optimizer/var.h"
+#include "parser/parsetree.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/syscache.h"
+
+
+/*
+ * Global context for foreign_expr_walker's search of an expression tree.
+ */
+typedef struct foreign_glob_cxt
+{
+    PlannerInfo *root;                      /* global planner state */
+    RelOptInfo *foreignrel;         /* the foreign relation we are planning for */
+} foreign_glob_cxt;
+
+/*
+ * Context for deparseExpr
+ */
+typedef struct deparse_expr_cxt
+{
+    PlannerInfo *root;                      /* global planner state */
+    RelOptInfo *foreignrel;         /* the foreign relation we are planning for */
+    StringInfo      buf;                    /* output buffer to append to */
+    List      **params_list;        /* exprs that will become remote Params */
+} deparse_expr_cxt;
+
+/*
+ * Functions to determine whether an expression can be evaluated safely on
+ * remote server.
+ */
+static bool foreign_expr_walker(Node *node,
+                                foreign_glob_cxt *glob_cxt,
+                                foreign_loc_cxt *outer_cxt);
+
+/*
+ * Functions to construct string representation of a node tree.
+ */
+static void deparseTargetList(StringInfo buf,
+                              PlannerInfo *root,
+                              Index rtindex,
+                              Relation rel,
+                              Bitmapset *attrs_used,
+                              List **retrieved_attrs);
+static void deparseColumnRef(StringInfo buf, int varno, int varattno,
+                             PlannerInfo *root);
+static void deparseRelation(StringInfo buf, Relation rel);
+static void deparseExpr(Expr *expr, deparse_expr_cxt *context);
+static void deparseVar(Var *node, deparse_expr_cxt *context);
+static void deparseConst(Const *node, deparse_expr_cxt *context);
+static void deparseParam(Param *node, deparse_expr_cxt *context);
+static void deparseArrayRef(ArrayRef *node, deparse_expr_cxt *context);
+static void deparseFuncExpr(FuncExpr *node, deparse_expr_cxt *context);
+static void deparseOpExpr(OpExpr *node, deparse_expr_cxt *context);
+static void deparseScalarArrayOpExpr(ScalarArrayOpExpr *node,
+                                     deparse_expr_cxt *context);
+static void deparseRelabelType(RelabelType *node, deparse_expr_cxt *context);
+static void deparseBoolExpr(BoolExpr *node, deparse_expr_cxt *context);
+static void deparseNullTest(NullTest *node, deparse_expr_cxt *context);
+static void deparseArrayExpr(ArrayExpr *node, deparse_expr_cxt *context);
+static void printRemoteParam(int paramindex, Oid paramtype, int32 paramtypmod,
+                             deparse_expr_cxt *context);
+static void printRemotePlaceholder(Oid paramtype, int32 paramtypmod,
+                                   deparse_expr_cxt *context);
+static char * quasar_quote_identifier(char *s);
+
+/* Functions used for rendering query and checking quasar ability */
+bool quasar_has_const(Const *node);
+bool quasar_has_function(FuncExpr *func, char **name);
+bool quasar_has_op(OpExpr *op, char **name, char *opkind);
+bool quasar_has_scalar_array_op(ScalarArrayOpExpr *arrayoper, char **name);
+bool quasar_can_pushdown_column(int varno, int varattno, PlannerInfo *root);
+
+/*
+ * Examine each qual clause in input_conds, and classify them into two groups,
+ * which are returned as two lists:
+ *      - remote_conds contains expressions that can be evaluated remotely
+ *      - local_conds contains expressions that can't be evaluated remotely
+ */
+void
+classifyConditions(PlannerInfo *root,
+                   RelOptInfo *baserel,
+                   List *input_conds,
+                   List **remote_conds,
+                   List **local_conds)
+{
+    ListCell   *lc;
+
+    *remote_conds = NIL;
+    *local_conds = NIL;
+
+    foreach(lc, input_conds)
+    {
+        RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
+
+        if (is_foreign_expr(root, baserel, ri->clause))
+            *remote_conds = lappend(*remote_conds, ri);
+        else
+            *local_conds = lappend(*local_conds, ri);
+    }
+}
+
+/*
+ * Returns true if given expr is safe to evaluate on the foreign server.
+ */
+bool
+is_foreign_expr(PlannerInfo *root,
+                RelOptInfo *baserel,
+                Expr *expr)
+{
+    foreign_glob_cxt glob_cxt;
+    foreign_loc_cxt loc_cxt;
+
+    /*
+     * Check that the expression consists of nodes that are safe to execute
+     * remotely.
+     */
+    glob_cxt.root = root;
+    glob_cxt.foreignrel = baserel;
+    loc_cxt.collation = InvalidOid;
+    loc_cxt.state = FDW_COLLATE_NONE;
+    if (!foreign_expr_walker((Node *) expr, &glob_cxt, &loc_cxt))
+        return false;
+
+    /*
+     * If the expression has a valid collation that does not arise from a
+     * foreign var, the expression can not be sent over.
+     */
+    if (loc_cxt.state == FDW_COLLATE_UNSAFE)
+        return false;
+
+    /*
+     * An expression which includes any mutable functions can't be sent over
+     * because its result is not stable.  For example, sending now() remote
+     * side could cause confusion from clock offsets.  Future versions might
+     * be able to make this choice with more granularity.  (We check this last
+     * because it requires a lot of expensive catalog lookups.)
+     */
+    if (contain_mutable_functions((Node *) expr))
+        return false;
+
+    /* OK to evaluate on the remote server */
+    return true;
+}
+
+
+/*
+ * These macros is used by foreign_expr_walker to identify PostgreSQL
+ * types that can be translated to Quasar SQL-2.
+ */
+#define canHandleType(x) ((x) == TEXTOID || (x) == CHAROID              \
+                          || (x) == BPCHAROID                           \
+                          || (x) == VARCHAROID || (x) == NAMEOID        \
+                          || (x) == INT8OID || (x) == INT2OID           \
+                          || (x) == INT4OID || (x) == OIDOID            \
+                          || (x) == FLOAT4OID || (x) == FLOAT8OID       \
+                          || (x) == NUMERICOID || (x) == DATEOID        \
+                          || (x) == TIMEOID || (x) == TIMESTAMPOID      \
+                          || (x) == INTERVALOID || (x) == BOOLOID)
+#define checkType(type) if (!canHandleType((type))) return false
+#define checkCollation(collid) if (collid != InvalidOid &&              \
+                                   collid != DEFAULT_COLLATION_ID) return false
+#define foreign_recurse(arg)\
+    if (!foreign_expr_walker((Node *) (arg), glob_cxt)) \
+        return false
+
+/*
+ * Check if expression is safe to execute remotely, and return true if so.
+ *
+ * In addition, *outer_cxt is updated with collation information.
+ *
+ * We must check that the expression contains only node types we can deparse,
+ * that all types/functions/operators are safe to send (they are "shippable"),
+ * and that all collations used in the expression derive from Vars of the
+ * foreign table.  Because of the latter, the logic is pretty close to
+ * assign_collations_walker() in parse_collate.c, though we can assume here
+ * that the given expression is valid.  Note function mutability is not
+ * currently considered here.
+ *
+ * Also checks to ensure types and operations are available on Quasar
+ */
+static bool
+foreign_expr_walker(Node *node,
+                    foreign_glob_cxt *glob_cxt)
+{
+    bool            check_type = true;
+    QuasarFdwRelationInfo *fpinfo;
+
+    /* Need do nothing for empty subexpressions */
+    if (node == NULL)
+        return true;
+
+    /* May need server info from baserel's fdw_private struct */
+    fpinfo = (QuasarFdwRelationInfo *) (glob_cxt->foreignrel->fdw_private);
+
+    switch (nodeTag(node))
+    {
+    case T_Var:
+    {
+        Var                *var = (Var *) node;
+
+        /*
+         * If the Var is from the foreign table, we consider its
+         * collation (if any) safe to use.  If it is from another
+         * table, we treat its collation the same way as we would a
+         * Param's collation, ie it's not safe for it to have a
+         * non-default collation.
+         */
+        if (var->varno == glob_cxt->foreignrel->relid &&
+            var->varlevelsup == 0)
+        {
+            /* Var belongs to foreign table */
+
+            /*
+             * System columns should not be sent to
+             * the remote
+             */
+            if (var->varattno < 0)
+                return false;
+
+            /* Check to make sure `nopushdown` is not enable for this column */
+            if (!quasar_can_pushdown_column(var->varno, var->varattno, glob_ctx->root))
+                return false;
+
+            checkCollation(var->varcollid);
+        }
+        else
+        {
+            checkType(var->vartype);
+            checkCollation(var->varcollid);
+        }
+    }
+    break;
+    case T_Const:
+    {
+        Const      *c = (Const *) node;
+
+        checkType(c->consttype);
+        checkCollation(c->constcollid);
+
+        if (!quasar_has_const(c))
+            return false;
+    }
+    break;
+    case T_Param:
+    {
+        Param      *p = (Param *) node;
+
+        checkType(p->paramtype);
+        checkCollation(p->paramcollid);
+    }
+    break;
+    case T_ArrayRef:
+    {
+        ArrayRef   *ar = (ArrayRef *) node;
+
+        /* Check to make sure element type is handleable */
+        checkType(ar->refelemtype);
+        checkCollation(ar->refcollid);
+
+        /* Assignment should not be in restrictions. */
+        if (ar->refassgnexpr != NULL)
+            return false;
+
+        /* Quasar can only handle single element references, not slicing */
+        if (ar->reflowerindexexpr != NULL) {
+            return false;
+        }
+
+        /*
+         * Recurse to remaining subexpressions.  Since the array
+         * subscripts must yield (noncollatable) integers, they won't
+         * affect the inner_cxt state.
+         */
+        foreign_recurse(ar->refupperindexpr);
+        foreign_recurse(ar->refexpr);
+    }
+    break;
+    case T_FuncExpr:
+    {
+        FuncExpr   *fe = (FuncExpr *) node;
+
+        checkType(fe->funcresulttype);
+        checkCollation(fe->inputcollid);
+        checkCollation(fe->funccollid);
+
+        /*
+         * We don't have to do anything for implicit casts
+         * But we don't allow anything else not supported by quasar
+         */
+        if (fe->funcformat != COERCE_IMPLICIT_CAST &&
+            !quasar_has_function(fe, NULL))
+            return false;
+
+        /*
+         * Recurse to input subexpressions.
+         */
+        foreign_recurse(fe->args);
+    }
+    break;
+    case T_OpExpr:
+    {
+        OpExpr     *oe = (OpExpr *) node;
+
+        checkCollation(oe->inputcollid);
+        checkCollation(oe->opcollid);
+
+        /* Similarly, only operators quasar has can be sent. */
+        if (!quasar_has_op(op, NULL))
+            return false;
+
+        /*
+         * Recurse to input subexpressions.
+         */
+        foreign_recurse(oe->args);
+    }
+    break;
+    case T_ScalarArrayOpExpr:
+    {
+        ScalarArrayOpExpr *oe = (ScalarArrayOpExpr *) node;
+
+        checkCollation(oe->inputcollid);
+
+        if (!quasar_has_scalar_array_op(oe, NULL))
+            return null;
+
+        foreign_recurse(oe->args);
+    }
+    break;
+    case T_RelabelType:
+    {
+        RelabelType *r = (RelabelType *) node;
+
+        /* Quasar doesn't really have types in the SQL sense
+         * So there's nothing to do for a relabel of a binary-compat type
+         */
+
+        checkCollation(r->resultcollid);
+        foreign_recurse(r->arg);
+    }
+    break;
+    case T_BoolExpr:
+    {
+        BoolExpr   *b = (BoolExpr *) node;
+
+        foreign_recurse(b->args);
+    }
+    break;
+    case T_NullTest:
+    {
+        NullTest   *nt = (NullTest *) node;
+
+        foreign_recurse(nt->arg);
+    }
+    break;
+    case T_ArrayExpr:
+    {
+        ArrayExpr  *a = (ArrayExpr *) node;
+
+        checkType(a->element_typeid);
+        checkCollation(a->array_collid);
+
+        foreign_recurse(a->elements);
+    }
+    break;
+    case T_List:
+    {
+        List       *l = (List *) node;
+        ListCell   *lc;
+
+        /*
+         * Recurse to component subexpressions.
+         */
+        foreach(lc, l)
+        {
+            foreign_recurse(lfirst(lc));
+        }
+    }
+    break;
+    default:
+
+        /*
+         * If it's anything else, assume it's unsafe.  This list can be
+         * expanded later, but don't forget to add deparse support below.
+         */
+        return false;
+    }
+
+    /* It looks OK */
+    return true;
+}
+
+/* quasar_has_function
+ * Test to see if quasar has a function
+ * If name is not NULL, put the function name into it
+ * Quasar name may be different from PG name
+ */
+bool quasar_has_function(FuncExpr *func, char **name) {
+    /* get function name and schema */
+    tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func->funcid));
+    if (! HeapTupleIsValid(tuple))
+    {
+        elog(ERROR, "cache lookup failed for function %u", func->funcid);
+    }
+    opername = pstrdup(((Form_pg_proc)GETSTRUCT(tuple))->proname.data);
+    schema = ((Form_pg_proc)GETSTRUCT(tuple))->pronamespace;
+    ReleaseSysCache(tuple);
+
+    /* ignore functions in other than the pg_catalog schema */
+    if (schema != PG_CATALOG_NAMESPACE)
+        return false;
+
+    /* FUNCTIONS */
+    /* the "normal" functions that we can translate */
+    if (strcmp(opername, "char_length") == 0
+        || strcmp(opername, "character_length") == 0
+        || strcmp(opername, "concat") == 0
+        || strcmp(opername, "length") == 0
+        || strcmp(opername, "lower") == 0
+        || (strcmp(opername, "substr") == 0 && list_length(func->args) == 3)
+        || (strcmp(opername, "substring") == 0 && list_length(func->args) == 3)
+        || strcmp(opername, "upper") == 0
+        || strcmp(opername, "date_part") == 0
+        || strcmp(opername, "to_timestamp") == 0)
+    {
+        if (name != NULL) {
+            /* Render the quasar function name into *name */
+            /* FUNCTION TRANSFORMS */
+            if (strcmp(opername, "char_length") == 0 ||
+                strcmp(opername, "character_length") == 0)
+                *name = pstrdup("length");
+            else if (strcmp(opername, "substr") == 0)
+                *name = pstrdup("substring");
+            else
+                *name = pstrdup(opername);
+        }
+
+        pfree(opername);
+        return true;
+    }
+
+    pfree(opername);
+    return false;
+}
+
+/* quasar_has_const
+ * Returns false if const is numeric type and NaN
+ * True otherwise
+ */
+bool quasar_has_const(Const *node) {
+    switch (node->consttype) {
+    case INT2OID:
+    case INT4OID:
+    case INT8OID:
+    case OIDOID:
+    case FLOAT4OID:
+    case FLOAT8OID:
+    case NUMERICOID:
+    {
+        Oid typoutput;
+        bool typisvarlena;
+        char *value;
+
+        getTypeOutuputInfo(node->consttype, &typoutput, &typisvarlena);
+        value = OidOutputFunctionCall(typoutput, node->constvalue);
+
+        if (strcmp(value, "NaN") == 0)
+            return false;
+
+        return true;
+    }
+    break;
+    }
+    return true;
+}
+
+/* quasar_has_op
+ * Test to see if quasar has a operator
+ * If name is not NULL, put the operator name into it
+ * If opkind is not NULL, put the opkind in it
+ * Quasar name may be different from PG name
+ */
+bool quasar_has_op(OpExpr *oper, char **name, char *opkind) {
+    /* get operator name, kind, argument type and schema */
+    tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(oper->opno));
+    if (! HeapTupleIsValid(tuple))
+    {
+        elog(ERROR, "cache lookup failed for operator %u", oper->opno);
+    }
+    opername = pstrdup(((Form_pg_operator)GETSTRUCT(tuple))->oprname.data);
+    oprkind = ((Form_pg_operator)GETSTRUCT(tuple))->oprkind;
+    schema = ((Form_pg_operator)GETSTRUCT(tuple))->oprnamespace;
+    leftargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprleft;
+    rightargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprright;
+    ReleaseSysCache(tuple);
+
+    /* ignore operators in other than the pg_catalog schema */
+    if (schema != PG_CATALOG_NAMESPACE)
+        return false;
+
+    if (strcmp(opername, "=") == 0     /* equal to */
+        || strcmp(opername, "<>") == 0 /* not equal to */
+        || strcmp(opername, ">") == 0  /* greater than */
+        || strcmp(opername, "<") == 0  /* less than */
+        || strcmp(opername, ">=") == 0 /* greater than or equal to */
+        || strcmp(opername, "<=") == 0 /* less than or equal to */
+        || strcmp(opername, "+") == 0 /* positive, addition */
+        || strcmp(opername, "/") == 0 /* division */
+        /* Cannot subtract DATEs in Quasar */
+        || (strcmp(opername, "-") == 0 /* negation, subtraction */
+            && rightargtype != DATEOID
+            && rightargtype != TIMESTAMPOID
+            && rightargtype != TIMESTAMPTZOID)
+        || strcmp(opername, "*") == 0 /* multiplication */
+        /* Regexes in Quasar only take constant right sides
+         * Also, Quasar doesn't have case insenstive LIKE operators (~~*)
+         * But it does have the posix-regex-like operators*/
+        || (strcmp(opername, "~~") == 0 /* case-senstive sql-regex */
+            && ((Expr*)lsecond(oper->args))->type == T_Const)
+        || (strcmp(opername, "!~~") == 0 /* case-sensitive NOT sql-regex */
+            && ((Expr*)lsecond(oper->args))->type == T_Const)
+        || strcmp(opername, "~") == 0 /* case-sensitive posix-regex */
+        || strcmp(opername, "!~") == 0 /* case-sensitive NOT posix-regex */
+        || strcmp(opername, "~*") == 0 /* case-insensitive posix-regex */
+        || strcmp(opername, "!~*") == 0 /* case-insensititve NOT posix-regex */
+        || strcmp(opername, "%") == 0 /* modulus */
+        )
+    {
+        if (name != NULL) {
+            if (oprkind == 'b') /* BINARY OPERATIONS */
+            {
+                if (strcmp(opername, "~~") == 0)
+                    *name = pstrdup("LIKE");
+                else if (strcmp(opername, "!~~"))
+                    *name = pstrdup("NOT LIKE");
+                else
+                    *name = pstrdup(opername);
+            }
+            else                /* UNARY OPERATIONS */
+            {
+                *name = pstrdup(opername);
+            }
+        }
+
+        if (opkind != NULL) *opkind = oprkind;
+
+        pfree(opername);
+        return true;
+    }
+
+    pfree(opername);
+    return false;
+}
+
+/* quasar_has_scalar_array_op
+ * Test to see if quasar has a scalar array operator
+ * such as (ANY, ALL, IN, NOT IN)
+ * If name is not NULL, put the operator name into it
+ * Quasar name may be different from PG name
+ */
+bool quasar_has_scalar_array_op(OpExpr *oper, char **name) {
+    /* get operator name, left argument type and schema */
+    tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(arrayoper->opno));
+    if (! HeapTupleIsValid(tuple))
+    {
+        elog(ERROR, "cache lookup failed for operator %u", arrayoper->opno);
+    }
+    opername = pstrdup(((Form_pg_operator)GETSTRUCT(tuple))->oprname.data);
+    leftargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprleft;
+    schema = ((Form_pg_operator)GETSTRUCT(tuple))->oprnamespace;
+    ReleaseSysCache(tuple);
+
+    if (schema != PG_CATALOG_NAMESPACE)
+        return false;
+
+    if ((strcmp(opername, "=") == 0 && arrayoper->useOr) || /* IN */
+        (strcmp(opername, "<>") == 0 && !arrayoper->useOr)) /* NOT IN */
+    {
+        if (name != NULL) {
+            if (strcmp(opername, "=") == 0 && arrayoper->useOr)
+                *name = pstrdup("IN");
+            else if (strcmp(opername, "<>") == 0 && !arrayoper->useOr)
+                *name = pstrdup("NOT IN");
+        }
+
+        pfree(opername);
+        return true;
+    }
+
+    pfree(opername);
+    return false;
+}
+
+/* Verify if we can pushdown a clause with this column in it
+ * This will be true if the column does not have "nopushdown" enabled on it
+ * This column can still be SELECTed, but not WHERE'd
+*/
+bool quasar_can_pushdown_column(int varno, int varattno, PlannerInfo *root) {
+    RangeTblEntry *rte;
+    List       *options;
+    ListCell   *lc;
+
+    /* varno must not be any of OUTER_VAR, INNER_VAR and INDEX_VAR. */
+    Assert(!IS_SPECIAL_VARNO(varno));
+
+    /* Get RangeTblEntry from array in PlannerInfo. */
+    rte = planner_rt_fetch(varno, root);
+
+    /*
+     * If it's a column of a foreign table, and it has the column_name FDW
+     * option, use that value.
+     */
+    options = GetForeignColumnOptions(rte->relid, varattno);
+    foreach(lc, options)
+    {
+        DefElem    *def = (DefElem *) lfirst(lc);
+
+        if (strcmp(def->defname, "nopushdown") == 0)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/*
+ * Construct a simple SELECT statement that retrieves desired columns
+ * of the specified foreign table, and append it to "buf".  The output
+ * contains just "SELECT ... FROM tablename".
+ *
+ * We also create an integer List of the columns being retrieved, which is
+ * returned to *retrieved_attrs.
+ */
+void
+deparseSelectSql(StringInfo buf,
+                 PlannerInfo *root,
+                 RelOptInfo *baserel,
+                 Bitmapset *attrs_used,
+                 List **retrieved_attrs)
+{
+    RangeTblEntry *rte = planner_rt_fetch(baserel->relid, root);
+    Relation        rel;
+
+    /*
+     * Core code already has some lock on each rel being planned, so we can
+     * use NoLock here.
+     */
+    rel = heap_open(rte->relid, NoLock);
+
+    /*
+     * Construct SELECT list
+     */
+    appendStringInfoString(buf, "SELECT ");
+    deparseTargetList(buf, root, baserel->relid, rel, attrs_used,
+                      retrieved_attrs);
+
+    /*
+     * Construct FROM clause
+     */
+    appendStringInfoString(buf, " FROM ");
+    deparseRelation(buf, rel);
+
+    heap_close(rel, NoLock);
+}
+
+/*
+ * Emit a target list that retrieves the columns specified in attrs_used.
+ * This is used for both SELECT and RETURNING targetlists.
+ *
+ * The tlist text is appended to buf, and we also create an integer List
+ * of the columns being retrieved, which is returned to *retrieved_attrs.
+ */
+static void
+deparseTargetList(StringInfo buf,
+                  PlannerInfo *root,
+                  Index rtindex,
+                  Relation rel,
+                  Bitmapset *attrs_used,
+                  List **retrieved_attrs)
+{
+    TupleDesc       tupdesc = RelationGetDescr(rel);
+    bool            have_wholerow;
+    bool            first;
+    int                     i;
+
+    *retrieved_attrs = NIL;
+
+    /* If there's a whole-row reference, we'll need all the columns. */
+    have_wholerow = bms_is_member(0 - FirstLowInvalidHeapAttributeNumber,
+                                  attrs_used);
+
+    first = true;
+    for (i = 1; i <= tupdesc->natts; i++)
+    {
+        Form_pg_attribute attr = tupdesc->attrs[i - 1];
+
+        /* Ignore dropped attributes. */
+        if (attr->attisdropped)
+            continue;
+
+        if (have_wholerow ||
+            bms_is_member(i - FirstLowInvalidHeapAttributeNumber,
+                          attrs_used))
+        {
+            if (!first)
+                appendStringInfoString(buf, ", ");
+            first = false;
+
+            deparseColumnRef(buf, rtindex, i, root);
+
+            *retrieved_attrs = lappend_int(*retrieved_attrs, i);
+        }
+    }
+
+    /* Don't generate bad syntax if no undropped columns */
+    if (first)
+        appendStringInfoString(buf, "NULL");
+}
+
+/*
+ * Deparse WHERE clauses in given list of RestrictInfos and append them to buf.
+ *
+ * baserel is the foreign table we're planning for.
+ *
+ * If no WHERE clause already exists in the buffer, is_first should be true.
+ *
+ * If params is not NULL, it receives a list of Params and other-relation Vars
+ * used in the clauses; these values must be transmitted to the remote server
+ * as parameter values.
+ *
+ * If params is NULL, we're generating the query for EXPLAIN purposes,
+ * so Params and other-relation Vars should be replaced by dummy values.
+ */
+void
+appendWhereClause(StringInfo buf,
+                  PlannerInfo *root,
+                  RelOptInfo *baserel,
+                  List *exprs,
+                  bool is_first,
+                  List **params)
+{
+    deparse_expr_cxt context;
+    ListCell   *lc;
+
+    if (params)
+        *params = NIL;                  /* initialize result list to empty */
+
+    /* Set up context struct for recursion */
+    context.root = root;
+    context.foreignrel = baserel;
+    context.buf = buf;
+    context.params_list = params;
+
+    foreach(lc, exprs)
+    {
+        RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
+
+        /* Connect expressions with "AND" and parenthesize each condition. */
+        if (is_first)
+            appendStringInfoString(buf, " WHERE ");
+        else
+            appendStringInfoString(buf, " AND ");
+
+        appendStringInfoChar(buf, '(');
+        deparseExpr(ri->clause, &context);
+        appendStringInfoChar(buf, ')');
+
+        is_first = false;
+    }
+
+}
+
+/*
+ * Construct name to use for given column, and emit it into buf.
+ * If it has a column_name FDW option, use that instead of attribute name.
+ */
+static void
+deparseColumnRef(StringInfo buf, int varno, int varattno, PlannerInfo *root)
+{
+    RangeTblEntry *rte;
+    char       *colname = NULL;
+    List       *options;
+    ListCell   *lc;
+
+    /* varno must not be any of OUTER_VAR, INNER_VAR and INDEX_VAR. */
+    Assert(!IS_SPECIAL_VARNO(varno));
+
+    /* Get RangeTblEntry from array in PlannerInfo. */
+    rte = planner_rt_fetch(varno, root);
+
+    /*
+     * If it's a column of a foreign table, and it has the column_name FDW
+     * option, use that value.
+     */
+    options = GetForeignColumnOptions(rte->relid, varattno);
+    foreach(lc, options)
+    {
+        DefElem    *def = (DefElem *) lfirst(lc);
+
+        if (strcmp(def->defname, "map") == 0)
+        {
+            colname = defGetString(def);
+            break;
+        }
+    }
+
+    /*
+     * If it's a column of a regular table or it doesn't have column_name FDW
+     * option, use attribute name.
+     */
+    if (colname == NULL)
+        colname = get_relid_attribute_name(rte->relid, varattno);
+
+    appendStringInfoStringbuf, quasar_quote_identifier(colname);
+}
+
+/*
+ * Append remote name of specified foreign table to buf.
+ * Use value of table_name FDW option (if any) instead of relation's name.
+ */
+static void
+deparseRelation(StringInfo buf, Relation rel)
+{
+    ForeignTable *table;
+    const char *relname = NULL;
+    ListCell   *lc;
+
+    /* obtain additional catalog information. */
+    table = GetForeignTable(RelationGetRelid(rel));
+
+    /*
+     * Use value of FDW options if any, instead of the name of object itself.
+     */
+    foreach(lc, table->options)
+    {
+        DefElem    *def = (DefElem *) lfirst(lc);
+
+        if (strcmp(def->defname, "table") == 0)
+            relname = defGetString(def);
+    }
+
+    if (relname == NULL)
+        relname = RelationGetRelationName(rel);
+
+    appendStringInfo(buf, "%s",
+                     quasar_quote_identifier(relname));
+}
+
+/*
+ * Append a SQL string literal representing "val" to buf.
+ */
+void
+deparseStringLiteral(StringInfo buf, const char *val)
+{
+    const char *valptr;
+
+    appendStringInfoChar(buf, '\'');
+    for (valptr = val; *valptr; valptr++)
+    {
+        char            ch = *valptr;
+
+        if (SQL_STR_DOUBLE(ch, false))
+            appendStringInfoChar(buf, ch);
+        appendStringInfoChar(buf, ch);
+    }
+    appendStringInfoChar(buf, '\'');
+}
+
+/*
+ * Deparse given expression into context->buf.
+ *
+ * This function must support all the same node types that foreign_expr_walker
+ * accepts.
+ *
+ * Note: unlike ruleutils.c, we just use a simple hard-wired parenthesization
+ * scheme: anything more complex than a Var, Const, function call or cast
+ * should be self-parenthesized.
+ */
+static void
+deparseExpr(Expr *node, deparse_expr_cxt *context)
+{
+    if (node == NULL)
+        return;
+
+    switch (nodeTag(node))
+    {
+    case T_Var:
+        deparseVar((Var *) node, context);
+        break;
+    case T_Const:
+        deparseConst((Const *) node, context);
+        break;
+    case T_Param:
+        deparseParam((Param *) node, context);
+        break;
+    case T_ArrayRef:
+        deparseArrayRef((ArrayRef *) node, context);
+        break;
+    case T_FuncExpr:
+        deparseFuncExpr((FuncExpr *) node, context);
+        break;
+    case T_OpExpr:
+        deparseOpExpr((OpExpr *) node, context);
+        break;
+    case T_ScalarArrayOpExpr:
+        deparseScalarArrayOpExpr((ScalarArrayOpExpr *) node, context);
+        break;
+    case T_RelabelType:
+        deparseRelabelType((RelabelType *) node, context);
+        break;
+    case T_BoolExpr:
+        deparseBoolExpr((BoolExpr *) node, context);
+        break;
+    case T_NullTest:
+        deparseNullTest((NullTest *) node, context);
+        break;
+    case T_ArrayExpr:
+        deparseArrayExpr((ArrayExpr *) node, context);
+        break;
+    default:
+        elog(ERROR, "unsupported expression type for deparse: %d",
+             (int) nodeTag(node));
+        break;
+    }
+}
+
+/*
+ * Deparse given Var node into context->buf.
+ *
+ * If the Var belongs to the foreign relation, just print its remote name.
+ * Otherwise, it's effectively a Param (and will in fact be a Param at
+ * run time).  Handle it the same way we handle plain Params --- see
+ * deparseParam for comments.
+ */
+static void
+deparseVar(Var *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+
+    if (node->varno == context->foreignrel->relid &&
+        node->varlevelsup == 0)
+    {
+        /* Var belongs to foreign table */
+        deparseColumnRef(buf, node->varno, node->varattno, context->root);
+    }
+    else
+    {
+        /* Treat like a Param */
+        if (context->params_list)
+        {
+            int                     pindex = 0;
+            ListCell   *lc;
+
+            /* find its index in params_list */
+            foreach(lc, *context->params_list)
+            {
+                pindex++;
+                if (equal(node, (Node *) lfirst(lc)))
+                    break;
+            }
+            if (lc == NULL)
+            {
+                /* not in list, so add it */
+                pindex++;
+                *context->params_list = lappend(*context->params_list, node);
+            }
+
+            printRemoteParam(pindex, node->vartype, node->vartypmod, context);
+        }
+        else
+        {
+            printRemotePlaceholder(node->vartype, node->vartypmod, context);
+        }
+    }
+}
+
+/*
+ * Deparse given constant value into context->buf.
+ *
+ * This function has to be kept in sync with ruleutils.c's get_const_expr.
+ */
+static void
+deparseConst(Const *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+    Oid                     typoutput;
+    bool            typIsVarlena;
+    char       *extval;
+    bool            isfloat = false;
+    bool            needlabel;
+
+    if (node->constisnull)
+    {
+        appendStringInfoString(buf, "NULL");
+        return;
+    }
+
+    getTypeOutputInfo(node->consttype,
+                      &typoutput, &typIsVarlena);
+    extval = OidOutputFunctionCall(typoutput, node->constvalue);
+
+    switch (node->consttype)
+    {
+    case INT2OID:
+    case INT4OID:
+    case INT8OID:
+    case OIDOID:
+    case FLOAT4OID:
+    case FLOAT8OID:
+    case NUMERICOID:
+    {
+        /*
+         * No need to quote unless it's a special value such as 'NaN'.
+         * See comments in get_const_expr().
+         */
+        if (strspn(extval, "0123456789+-eE.") == strlen(extval))
+        {
+            if (extval[0] == '+' || extval[0] == '-')
+                appendStringInfo(buf, "(%s)", extval);
+            else
+                appendStringInfoString(buf, extval);
+            if (strcspn(extval, "eE.") != strlen(extval))
+                isfloat = true; /* it looks like a float */
+        }
+        else
+            appendStringInfo(buf, "'%s'", extval);
+    }
+    break;
+    case BOOLOID:
+        if (strcmp(extval, "t") == 0)
+            appendStringInfoString(buf, "true");
+        else
+            appendStringInfoString(buf, "false");
+        break;
+    case DATEOID:
+        appendStringInfo(buf, "DATE '%s'", extval);
+        break;
+    case TIMESTAMPOID:
+        appendStringInfo(buf, "TIMESTAMP '%s'", extval);
+        break;
+    case INTERVALOID:
+        appendStringInfo(buf, "INTERVAL '%s'", extval);
+        break;
+    default:
+        deparseStringLiteral(buf, extval);
+        break;
+    }
+}
+
+/*
+ * Deparse given Param node.
+ *
+ * If we're generating the query "for real", add the Param to
+ * context->params_list if it's not already present, and then use its index
+ * in that list as the remote parameter number.  During EXPLAIN, there's
+ * no need to identify a parameter number.
+ */
+static void
+deparseParam(Param *node, deparse_expr_cxt *context)
+{
+    if (context->params_list)
+    {
+        int                     pindex = 0;
+        ListCell   *lc;
+
+        /* find its index in params_list */
+        foreach(lc, *context->params_list)
+        {
+            pindex++;
+            if (equal(node, (Node *) lfirst(lc)))
+                break;
+        }
+        if (lc == NULL)
+        {
+            /* not in list, so add it */
+            pindex++;
+            *context->params_list = lappend(*context->params_list, node);
+        }
+
+        printRemoteParam(pindex, node->paramtype, node->paramtypmod, context);
+    }
+    else
+    {
+        printRemotePlaceholder(node->paramtype, node->paramtypmod, context);
+    }
+}
+
+/*
+ * Deparse an array subscript expression.
+ */
+static void
+deparseArrayRef(ArrayRef *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+    ListCell   *uplist_item;
+
+    /* Always parenthesize the expression. */
+    appendStringInfoChar(buf, '(');
+
+    /*
+     * Deparse referenced array expression first.  If that expression includes
+     * a cast, we have to parenthesize to prevent the array subscript from
+     * being taken as typename decoration.  We can avoid that in the typical
+     * case of subscripting a Var, but otherwise do it.
+     */
+    if (IsA(node->refexpr, Var))
+        deparseExpr(node->refexpr, context);
+    else
+    {
+        appendStringInfoChar(buf, '(');
+        deparseExpr(node->refexpr, context);
+        appendStringInfoChar(buf, ')');
+    }
+
+    /* Deparse subscript expressions. */
+    /* We've ensured in foreign_expr_walk that these are only
+     * single-value subscripts
+     */
+    foreach(uplist_item, node->refupperindexpr)
+    {
+        appendStringInfoChar(buf, '[');
+        deparseExpr(lfirst(uplist_item), context);
+        appendStringInfoChar(buf, ']');
+    }
+
+    appendStringInfoChar(buf, ')');
+}
+
+/*
+ * Deparse a function call.
+ */
+static void
+deparseFuncExpr(FuncExpr *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+    HeapTuple       proctup;
+    char *funcname;
+    bool            use_variadic;
+    bool            first;
+    ListCell   *arg;
+
+    /*
+     * If the function call came from an implicit coercion, then just show the
+     * first argument.
+     */
+    if (node->funcformat == COERCE_IMPLICIT_CAST)
+    {
+        deparseExpr((Expr *) linitial(node->args), context);
+        return;
+    }
+
+    /* Get the quasar function name and deparse */
+    quasar_has_function(node, &funcname);
+    appendStringInfo(buf, "%s(", quasar_quote_identifier(funcname));
+
+    /* ... and all the arguments */
+    first = true;
+    foreach(arg, node->args)
+    {
+        if (!first)
+            appendStringInfoString(buf, ", ");
+        deparseExpr((Expr *) lfirst(arg), context);
+        first = false;
+    }
+    appendStringInfoChar(buf, ')');
+
+}
+
+/*
+ * Deparse given operator expression.   To avoid problems around
+ * priority of operations, we always parenthesize the arguments.
+ */
+static void
+deparseOpExpr(OpExpr *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+    char *opname;
+    char oprkind;
+    ListCell   *arg;
+
+    /* Get the quasar operation name */
+    quasar_has_op(node, &opname, &oprkind);
+
+    /* Sanity check. */
+    Assert((oprkind == 'r' && list_length(node->args) == 1) ||
+           (oprkind == 'l' && list_length(node->args) == 1) ||
+           (oprkind == 'b' && list_length(node->args) == 2));
+
+    /* Always parenthesize the expression. */
+    appendStringInfoChar(buf, '(');
+
+    /* Deparse left operand. */
+    if (oprkind == 'r' || oprkind == 'b')
+    {
+        arg = list_head(node->args);
+        deparseExpr(lfirst(arg), context);
+        appendStringInfoChar(buf, ' ');
+    }
+
+    /* Insert the operator itself */
+    appendStringInfoString(buf, opname);
+
+    /* Deparse right operand. */
+    if (oprkind == 'l' || oprkind == 'b')
+    {
+        arg = list_tail(node->args);
+        appendStringInfoChar(buf, ' ');
+        deparseExpr(lfirst(arg), context);
+    }
+
+    appendStringInfoChar(buf, ')');
+}
+
+/*
+ * Deparse given ScalarArrayOpExpr expression.  To avoid problems
+ * around priority of operations, we always parenthesize the arguments.
+ */
+static void
+deparseScalarArrayOpExpr(ScalarArrayOpExpr *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+    Expr       *arg1;
+    Expr       *arg2;
+    char *opname;
+
+    quasar_has_scalar_array_op(node, &opname);
+
+    /* Sanity check. */
+    Assert(list_length(node->args) == 2);
+
+    /* Always parenthesize the expression. */
+    appendStringInfoChar(buf, '(');
+
+    /* Deparse left operand. */
+    arg1 = linitial(node->args);
+    deparseExpr(arg1, context);
+    appendStringInfoChar(buf, ' ');
+
+    /* Deparse operator name. */
+    appendStringInfo(buf, " %s (", opname);
+
+    /* Deparse right operand. */
+    arg2 = lsecond(node->args);
+    deparseExpr(arg2, context);
+
+    appendStringInfoChar(buf, ')');
+
+    /* Always parenthesize the expression. */
+    appendStringInfoChar(buf, ')');
+
+    ReleaseSysCache(tuple);
+}
+
+/*
+ * Deparse a RelabelType (binary-compatible cast) node.
+ */
+static void
+deparseRelabelType(RelabelType *node, deparse_expr_cxt *context)
+{
+    /* Quasar is untyped so don't do anything */
+    deparseExpr(node->arg, context);
+}
+
+/*
+ * Deparse a BoolExpr node.
+ */
+static void
+deparseBoolExpr(BoolExpr *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+    const char *op = NULL;          /* keep compiler quiet */
+    bool            first;
+    ListCell   *lc;
+
+    switch (node->boolop)
+    {
+    case AND_EXPR:
+        op = "AND";
+        break;
+    case OR_EXPR:
+        op = "OR";
+        break;
+    case NOT_EXPR:
+        appendStringInfoString(buf, "(NOT ");
+        deparseExpr(linitial(node->args), context);
+        appendStringInfoChar(buf, ')');
+        return;
+    }
+
+    appendStringInfoChar(buf, '(');
+    first = true;
+    foreach(lc, node->args)
+    {
+        if (!first)
+            appendStringInfo(buf, " %s ", op);
+        deparseExpr((Expr *) lfirst(lc), context);
+        first = false;
+    }
+    appendStringInfoChar(buf, ')');
+}
+
+/*
+ * Deparse IS [NOT] NULL expression.
+ */
+static void
+deparseNullTest(NullTest *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+
+    appendStringInfoChar(buf, '(');
+    deparseExpr(node->arg, context);
+    if (node->nulltesttype == IS_NULL)
+        appendStringInfoString(buf, " IS NULL)");
+    else
+        appendStringInfoString(buf, " IS NOT NULL)");
+}
+
+/*
+ * Deparse ARRAY[...] construct.
+ */
+static void
+deparseArrayExpr(ArrayExpr *node, deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+    bool            first = true;
+    ListCell   *lc;
+
+    appendStringInfoString(buf, "[");
+    foreach(lc, node->elements)
+    {
+        if (!first)
+            appendStringInfoString(buf, ", ");
+        deparseExpr(lfirst(lc), context);
+        first = false;
+    }
+    appendStringInfoChar(buf, ']');
+}
+
+/*
+ * Print the representation of a parameter to be sent to the remote side.
+ */
+static void
+printRemoteParam(int paramindex, Oid paramtype, int32 paramtypmod,
+                 deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+
+    appendStringInfo(buf, ":p%d", paramindex);
+}
+
+/*
+ * Print the representation of a placeholder for a parameter that will be
+ * sent to the remote side at execution time.
+ *
+ * This is used when we're just trying to EXPLAIN the remote query.
+ * We don't have the actual value of the runtime parameter yet, and we don't
+ * want the remote planner to generate a plan that depends on such a value
+ * anyway.  Thus, we can't do something simple like "$1::paramtype".
+ * Instead, we emit "((SELECT null::paramtype)::paramtype)".
+ * In all extant versions of Postgres, the planner will see that as an unknown
+ * constant value, which is what we want.  This might need adjustment if we
+ * ever make the planner flatten scalar subqueries.  Note: the reason for the
+ * apparently useless outer cast is to ensure that the representation as a
+ * whole will be parsed as an a_expr and not a select_with_parens; the latter
+ * would do the wrong thing in the context "x = ANY(...)".
+ */
+static void
+printRemotePlaceholder(Oid paramtype, int32 paramtypmod,
+                       deparse_expr_cxt *context)
+{
+    StringInfo      buf = context->buf;
+
+    appendStringInfo(buf, "((SELECT null))");
+}
+
+/*
+ * Deparse ORDER BY clause according to the given pathkeys for given base
+ * relation. From given pathkeys expressions belonging entirely to the given
+ * base relation are obtained and deparsed.
+ */
+void
+appendOrderByClause(StringInfo buf, PlannerInfo *root, RelOptInfo *baserel,
+                    List *pathkeys)
+{
+    ListCell   *lcell;
+    deparse_expr_cxt context;
+    char       *delim = " ";
+
+    /* Set up context struct for recursion */
+    context.root = root;
+    context.foreignrel = baserel;
+    context.buf = buf;
+    context.params_list = NULL;
+
+    appendStringInfo(buf, " ORDER BY");
+    foreach(lcell, pathkeys)
+    {
+        PathKey    *pathkey = lfirst(lcell);
+        Expr       *em_expr;
+
+        em_expr = find_em_expr_for_rel(pathkey->pk_eclass, baserel);
+        Assert(em_expr != NULL);
+
+        appendStringInfoString(buf, delim);
+        deparseExpr(em_expr, &context);
+        if (pathkey->pk_strategy == BTLessStrategyNumber)
+            appendStringInfoString(buf, " ASC");
+        else
+            appendStringInfoString(buf, " DESC");
+
+        delim = ", ";
+    }
+}
+
+
+/* Quasar Identifier auto-quoter.
+ * transforms `top[*].mid.bot[0]` to `"top"[*]."mid"."bot"[0]`
+ */
+typedef enum {
+    QUOTE_STATE_DEFAULT,
+    QUOTE_STATE_IN_QUOTE,
+    QUOTE_STATE_IN_ARRAYREF
+} QuasarQuoteState;
+
+static char *
+quasar_quote_identifier(char *s) {
+    QuasarQuoteState state = QUOTE_STATE_DEFAULT;
+    StringInfoData buf;
+    initStringInfo(&buf);
+
+    fore (; *s != '\0'; ++s)
+    {
+        switch(state) {
+        case QUOTE_STATE_DEFAULT:
+            switch(s) {
+            case '.':
+                break;
+            case '[':
+                state = QUOTE_STATE_IN_ARRAYREF;
+                break;
+            case '"':
+                /* User self-quoting */
+                state = QUOTE_STATE_IN_QUOTE;
+                break;
+            default:
+                /* We have encountered a token to quote */
+                state = QUOTE_STATE_IN_QUOTE;
+                appendStringInfoChar(&buf, '"');
+            }
+            break;
+        case QUOTE_STATE_IN_QUOTE:
+            switch(s) {
+            case '.':
+                state = QUOTE_STATE_DEFAULT;
+                appendStringInfoChar(&buf, '"');
+                break;
+            case '[':
+                state = QUOTE_STATE_IN_ARRAYREF;
+                break;
+            case '"':
+                state = QUOTE_STATE_DEFAULT;
+                break;
+            }
+            break;
+        case QUOTE_STATE_IN_ARRAYREF:
+            switch(s) {
+            case ']':
+                state = QUOTE_STATE_DEFAULT;
+                break;
+            }
+            break;
+        }
+        appendStringInfoChar(&buf, *s);
+    }
+
+    return buf.data;
+}

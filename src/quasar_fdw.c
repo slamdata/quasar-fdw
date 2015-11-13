@@ -91,8 +91,8 @@ PG_MODULE_MAGIC;
 /* Callback argument for ec_member_matches_foreign */
 typedef struct
 {
-    Expr	   *current;		/* current expr, or NULL if not yet found */
-    List	   *already_used;	/* expressions already dealt with */
+    Expr           *current;            /* current expr, or NULL if not yet found */
+    List           *already_used;       /* expressions already dealt with */
 } ec_member_foreign_arg;
 
 /*
@@ -281,10 +281,6 @@ quasarGetForeignPaths(PlannerInfo *root,
       startup_cost = 100;
       total_cost = startup_cost;
 
-      elog(DEBUG1, "join length %d", list_length(baserel->joininfo));
-      elog(DEBUG1, "query pathkeys %d", list_length(root->query_pathkeys));
-
-
       /* Create a ForeignPath node and add it as only possible path */
       add_path(baserel, (Path *)
                create_foreignscan_path(root, baserel,
@@ -292,7 +288,7 @@ quasarGetForeignPaths(PlannerInfo *root,
                                        startup_cost,
                                        total_cost,
                                        fdwPlan->pathkeys,
-                                       NULL,            /* no outer rel either */
+                                       NULL, /* fdwPlan->outer_rels, */
                                        NIL));           /* no fdw_private data */
 }
 
@@ -457,6 +453,7 @@ quasarBeginForeignScan(ForeignScanState *node,
 
           /* Check for null */
           if (is_null) {
+              elog(DEBUG1, "quasar_fdw: Parameter p%d = NULL", index);
               appendStringInfo(&buf, "&p%d=null", index);
           } else {
               Oid type;
@@ -478,6 +475,7 @@ quasarBeginForeignScan(ForeignScanState *node,
               value_encoded = curl_easy_escape(curl, value, 0);
 
               /* Insert into the query string */
+              elog(DEBUG1, "quasar_fdw: Parameter p%d = %s", index, value);
               appendStringInfo(&buf, "&p%d=%s", index, value_encoded);
 
               curl_free(value_encoded); /* Cleanup of malloc'd memory. */
@@ -922,7 +920,6 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
     List **params = &plan->params;
     bool **pushdown_clauses = &plan->pushdown_clauses;
     List **usable_pathkeys = &plan->pathkeys;
-    List **ppi_list = &plan->ppi;
 
     elog(DEBUG1, "entering function %s", __func__);
 
@@ -965,14 +962,47 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
         appendStringInfo(&query, "'1'");
     appendStringInfo(&query, " FROM %s", quasarTable->name);
 
-    /* JOIN */
-    *ppi_list = NIL;
+    /* WHERE */
+    /* allocate enough space for pushdown_clauses */
+    if (conditions != NIL)
+    {
+        *pushdown_clauses = (bool *)palloc(sizeof(bool) * list_length(conditions));
+    }
+
+    /* append WHERE clauses */
+    first_col = true;
+    foreach(cell, conditions)
+    {
+        /* try to convert each condition to Oracle SQL */
+        where = getQuasarClause(foreignrel, ((RestrictInfo *)lfirst(cell))->clause, quasarTable, params);
+        if (where != NULL) {
+            /* append new WHERE clause to query string */
+            if (first_col)
+            {
+                first_col = false;
+                appendStringInfo(&query, " WHERE %s", where);
+            }
+            else
+            {
+                appendStringInfo(&query, " AND %s", where);
+            }
+            pfree(where);
+
+            (*pushdown_clauses)[++clause_count] = true;
+        }
+        else
+            (*pushdown_clauses)[++clause_count] = false;
+    }
+
+    List *ppi_list = NIL;
+    plan->outer_rels = NULL;
+    /* JOINs become parameterize WHERE */
     foreach(cell, foreignrel->joininfo) {
         RestrictInfo *rinfo = (RestrictInfo *) lfirst(cell);
         Relids          required_outer;
         ParamPathInfo *param_info;
         char *joinpart;
-        int len = list_length(*ppi_list);
+        int len = list_length(ppi_list);
 
         /* Check if clause can be moved to this rel */
         if (!join_clause_is_movable_to(rinfo, foreignrel))
@@ -1003,15 +1033,18 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
         param_info = get_baserel_parampathinfo(root, foreignrel, required_outer);
         Assert(param_info != NULL);
 
-        /*
-         * Add it to list unless we already have it.  Testing pointer equality
-         * is OK since get_baserel_parampathinfo won't make duplicates.
-         */
-        *ppi_list = list_append_unique_ptr(*ppi_list, param_info);
 
         /* If it was a successful addition, add it to the query */
-        if (len < list_length(*ppi_list)) {
-            elog(DEBUG1, "Adding JOIN To query: %s", joinpart);
+        if (len < list_length(ppi_list)) {
+            elog(DEBUG1, "Adding parameterized JOIN condition To query: %s", joinpart);
+            if (first_col) {
+                appendStringInfo(&query, " WHERE %s", joinpart);
+                first_col = false;
+            } else {
+                appendStringInfo(&query, " AND %s", joinpart);
+            }
+
+            plan->outer_rels = bms_union(plan->outer_rels, required_outer);
         }
         pfree(joinpart);
     }
@@ -1055,7 +1088,7 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
                 Relids          required_outer;
                 ParamPathInfo *param_info;
                 char *joinpart;
-                int len = list_length(*ppi_list);
+                int len = list_length(ppi_list);
 
                 /* Check if clause can be moved to this rel */
                 if (!join_clause_is_movable_to(rinfo, foreignrel))
@@ -1082,10 +1115,18 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
                 Assert(param_info != NULL);
 
                 /* Add it to list unless we already have it */
-                *ppi_list = list_append_unique_ptr(*ppi_list, param_info);
+                ppi_list = list_append_unique_ptr(ppi_list, param_info);
 
-                if (len < list_length(*ppi_list)) {
-                    elog(DEBUG1, "Adding EC JOIN %s", joinpart);
+                if (len < list_length(ppi_list)) {
+                    elog(DEBUG1, "Adding parameterized equivalence class join part: %s", joinpart);
+                    if (first_col) {
+                        appendStringInfo(&query, " WHERE %s", joinpart);
+                        first_col = false;
+                    } else {
+                        appendStringInfo(&query, " AND %s", joinpart);
+                    }
+
+                    plan->outer_rels = bms_union(plan->outer_rels, required_outer);
                 }
                 pfree(joinpart);
             }
@@ -1093,38 +1134,6 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
             /* Try again, now ignoring the expression we found this time */
             arg.already_used = lappend(arg.already_used, arg.current);
         }
-    }
-
-    /* WHERE */
-    /* allocate enough space for pushdown_clauses */
-    if (conditions != NIL)
-    {
-        *pushdown_clauses = (bool *)palloc(sizeof(bool) * list_length(conditions));
-    }
-
-    /* append WHERE clauses */
-    first_col = true;
-    foreach(cell, conditions)
-    {
-        /* try to convert each condition to Oracle SQL */
-        where = getQuasarClause(foreignrel, ((RestrictInfo *)lfirst(cell))->clause, quasarTable, params);
-        if (where != NULL) {
-            /* append new WHERE clause to query string */
-            if (first_col)
-            {
-                first_col = false;
-                appendStringInfo(&query, " WHERE %s", where);
-            }
-            else
-            {
-                appendStringInfo(&query, " AND %s", where);
-            }
-            pfree(where);
-
-            (*pushdown_clauses)[++clause_count] = true;
-        }
-        else
-            (*pushdown_clauses)[++clause_count] = false;
     }
 
     /*
@@ -2110,7 +2119,7 @@ ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
                           void *arg)
 {
     ec_member_foreign_arg *state = (ec_member_foreign_arg *) arg;
-    Expr	   *expr = em->em_expr;
+    Expr           *expr = em->em_expr;
 
     /*
      * If we've identified what we're processing in the current scan, we only
