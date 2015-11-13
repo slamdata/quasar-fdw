@@ -9,6 +9,13 @@ The main advantage of using this FDW over alternatives is that it takes full adv
 
 11/13/2015:
 - Even though [SQL/MED](https://wiki.postgresql.org/wiki/SQL/MED) claims ORDER BY clauses can't be pushed down, they can! I just got that to work.
+- After much reading through the `postgres_fdw`, I have figured out how to optimize JOINs. Essentially, we cannot ever fully push a JOIN down to Quasar. But we can optimize the queries to minimally scan the tables. Also to do this, I have to rewrite the entire query creation part of the system. I'm about 70% the way through that.
+- Next Steps:
+    - Finish rewrite and optimize joins (with tests)
+    - Add remote query estimation ability (good for optimizing join scans between tables with different sizes)
+    - Add ANALYZE / EXPLAIN VERBOSE syntax
+    - Create packaging script
+    - Test on various platforms
 
 11/11/2015:
 - Tell postgres to not execute WHERE filters when we are pushing a WHERE filter down.
