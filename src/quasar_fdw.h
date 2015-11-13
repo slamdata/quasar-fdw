@@ -78,13 +78,24 @@ struct QuasarTable
  */
 typedef struct QuasarFdwPlanState
 {
-    /* Actual query to be executed by Quasar */
+    /* Actual query to be executed by Quasar
+     * Created in createQuery
+     * Passed through (de)serializePlanState
+     * Used in BeginForeignScan
+     */
     char *query;
 
-    /* List of constant parameters to execute in query parameters */
+    /* List of constant parameters to execute in query parameters
+     * Created in createQuery
+     * Passed through GetForeignRelPaths
+     * Executed in BeginForeignScan
+     */
     List *params;
 
-    /* Bools representing which clauses have been fully pushed down to Quasar */
+    /* Bools representing which clauses have been fully pushed down to Quasar
+     * Created by createQuery
+     * Used in GetForeignRelPaths
+     */
     bool *pushdown_clauses;
 
     /* List of pathkeys to use in this query.
@@ -93,6 +104,12 @@ typedef struct QuasarFdwPlanState
      * Passed to PG via GetForeignRelPaths
      */
     List *pathkeys;
+
+    /* List of ParamPathInfo for joins in this query
+     * Created by createQuery
+     * Passed to PG via GetForeignRelPaths
+     */
+    List *ppi;
 
     /* Representation of the table we are querying */
     struct QuasarTable *quasarTable;

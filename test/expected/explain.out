@@ -159,12 +159,24 @@ EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '
 (3 rows)
 
 /* ORDER BY pushdown */
-EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY length(city), -pop, state;
-                                      QUERY PLAN                                      
---------------------------------------------------------------------------------------
- Foreign Scan on zips
-   Quasar query: SELECT city, pop, state FROM zips ORDER BY length(city),(-pop),state
-(2 rows)
+EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY length(city), pop DESC, state;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Sort
+   Sort Key: (length((city)::text)), pop, state
+   ->  Foreign Scan on zips
+         Quasar query: SELECT city, pop, state FROM zips
+(4 rows)
+
+/* Can't pushdown NULLS FIRST */
+EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY state NULLS FIRST;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Sort
+   Sort Key: state
+   ->  Foreign Scan on zips
+         Quasar query: SELECT city, pop, state FROM zips
+(4 rows)
 
 /* If one ORDER BY column can't be pushed down, none are */
 EXPLAIN (COSTS off) SELECT * FROM commits ORDER BY ts, sha;

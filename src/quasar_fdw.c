@@ -50,6 +50,7 @@
 #include "nodes/pg_list.h"
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
+#include "optimizer/paths.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/var.h"
@@ -86,6 +87,13 @@
 #include "quasar_fdw.h"
 
 PG_MODULE_MAGIC;
+
+/* Callback argument for ec_member_matches_foreign */
+typedef struct
+{
+    Expr	   *current;		/* current expr, or NULL if not yet found */
+    List	   *already_used;	/* expressions already dealt with */
+} ec_member_foreign_arg;
 
 /*
  * SQL functions
@@ -136,6 +144,8 @@ void execute_curl(struct QuasarFdwExecState *festate);
 static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf);
 static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 
+
+
 /*
  * Private functions
  */
@@ -147,6 +157,9 @@ List *serializePlanState(struct QuasarFdwPlanState *fdwState);
 struct QuasarFdwPlanState *deserializePlanState(List *l);
 static char *datumToString(Datum datum, Oid type);
 Expr *find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel);
+static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
+                                      EquivalenceClass *ec, EquivalenceMember *em,
+                                      void *arg);
 
 /*
  * _PG_init
@@ -909,10 +922,9 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
     List **params = &plan->params;
     bool **pushdown_clauses = &plan->pushdown_clauses;
     List **usable_pathkeys = &plan->pathkeys;
+    List **ppi_list = &plan->ppi;
 
     elog(DEBUG1, "entering function %s", __func__);
-
-    /* first, find all the columns to include in the select list */
 
     /* examine each SELECT list entry for Var nodes */
     foreach(cell, columnlist)
@@ -953,7 +965,137 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
         appendStringInfo(&query, "'1'");
     appendStringInfo(&query, " FROM %s", quasarTable->name);
 
+    /* JOIN */
+    *ppi_list = NIL;
+    foreach(cell, foreignrel->joininfo) {
+        RestrictInfo *rinfo = (RestrictInfo *) lfirst(cell);
+        Relids          required_outer;
+        ParamPathInfo *param_info;
+        char *joinpart;
+        int len = list_length(*ppi_list);
 
+        /* Check if clause can be moved to this rel */
+        if (!join_clause_is_movable_to(rinfo, foreignrel))
+            continue;
+
+        /* See if it is safe to send to remote */
+        joinpart = getQuasarClause(foreignrel, rinfo->clause,
+                                   quasarTable, params);
+        if (joinpart == NULL)
+            continue;
+
+        /* Calculate required outer rels for the resulting path */
+        required_outer = bms_union(rinfo->clause_relids,
+                                   foreignrel->lateral_relids);
+        /* We do not want the foreign rel itself listed in required_outer */
+        required_outer = bms_del_member(required_outer, foreignrel->relid);
+
+        /*
+         * required_outer probably can't be empty here, but if it were, we
+         * couldn't make a parameterized path.
+         */
+        if (bms_is_empty(required_outer)) {
+            pfree(joinpart);
+            continue;
+        }
+
+        /* Get the ParamPathInfo */
+        param_info = get_baserel_parampathinfo(root, foreignrel, required_outer);
+        Assert(param_info != NULL);
+
+        /*
+         * Add it to list unless we already have it.  Testing pointer equality
+         * is OK since get_baserel_parampathinfo won't make duplicates.
+         */
+        *ppi_list = list_append_unique_ptr(*ppi_list, param_info);
+
+        /* If it was a successful addition, add it to the query */
+        if (len < list_length(*ppi_list)) {
+            elog(DEBUG1, "Adding JOIN To query: %s", joinpart);
+        }
+        pfree(joinpart);
+    }
+
+    /*
+     * The above scan examined only "generic" join clauses, not those that
+     * were absorbed into EquivalenceClauses.  See if we can make anything out
+     * of EquivalenceClauses.
+     */
+    if (foreignrel->has_eclass_joins) {
+        /*
+         * We repeatedly scan the eclass list looking for column references
+         * (or expressions) belonging to the foreign rel.  Each time we find
+         * one, we generate a list of equivalence joinclauses for it, and then
+         * see if any are safe to send to the remote.  Repeat till there are
+         * no more candidate EC members.
+         */
+        ec_member_foreign_arg arg;
+
+        arg.already_used = NIL;
+        for (;;) {
+            List       *clauses;
+
+            /* Make clauses, skipping any that join to lateral_referencers */
+            arg.current = NULL;
+            clauses = generate_implied_equalities_for_column(root,
+                                                             foreignrel,
+                                                             ec_member_matches_foreign,
+                                                             (void *) &arg,
+                                                             foreignrel->lateral_referencers);
+
+            /* Done if there are no more expressions in the foreign rel */
+            if (arg.current == NULL) {
+                Assert(clauses == NIL);
+                break;
+            }
+
+            /* Scan the extracted join clauses */
+            foreach(cell, clauses) {
+                RestrictInfo *rinfo = (RestrictInfo *) lfirst(cell);
+                Relids          required_outer;
+                ParamPathInfo *param_info;
+                char *joinpart;
+                int len = list_length(*ppi_list);
+
+                /* Check if clause can be moved to this rel */
+                if (!join_clause_is_movable_to(rinfo, foreignrel))
+                    continue;
+
+                /* See if it is safe to send to remote */
+                joinpart = getQuasarClause(foreignrel, rinfo->clause,
+                                           quasarTable, params);
+                if (joinpart == NULL)
+                    continue;
+
+                /* Calculate required outer rels for the resulting path */
+                required_outer = bms_union(rinfo->clause_relids,
+                                           foreignrel->lateral_relids);
+                required_outer = bms_del_member(required_outer, foreignrel->relid);
+                if (bms_is_empty(required_outer)) {
+                    pfree(joinpart);
+                    continue;
+                }
+
+                /* Get the ParamPathInfo */
+                param_info = get_baserel_parampathinfo(root, foreignrel,
+                                                       required_outer);
+                Assert(param_info != NULL);
+
+                /* Add it to list unless we already have it */
+                *ppi_list = list_append_unique_ptr(*ppi_list, param_info);
+
+                if (len < list_length(*ppi_list)) {
+                    elog(DEBUG1, "Adding EC JOIN %s", joinpart);
+                }
+                pfree(joinpart);
+            }
+
+            /* Try again, now ignoring the expression we found this time */
+            arg.already_used = lappend(arg.already_used, arg.current);
+        }
+    }
+
+    /* WHERE */
     /* allocate enough space for pushdown_clauses */
     if (conditions != NIL)
     {
@@ -1005,7 +1147,7 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
          * getQuasarClause would detect volatile expressions as well, but
          * ec_has_volatile saves some cycles.
          */
-        if (!pathkey_ec->ec_has_volatile) {
+        if (!pathkey_ec->ec_has_volatile && !pathkey->pk_nulls_first) {
             em_expr = find_em_expr_for_rel(pathkey_ec, foreignrel);
             if (em_expr) {
                 querypart = getQuasarClause(foreignrel, em_expr, quasarTable, params);
@@ -1017,6 +1159,13 @@ void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *
             first_col = false;
             appendStringInfo(&orderby, "%s", querypart);
             *usable_pathkeys = lappend(*usable_pathkeys, pathkey);
+            pfree(querypart);
+
+            if (pathkey->pk_strategy == BTLessStrategyNumber)
+                appendStringInfoString(&orderby, " ASC");
+            else
+                appendStringInfoString(&orderby, " DESC");
+
         } else {
             /*
              * The planner and executor don't have any clever strategy for
@@ -1948,4 +2097,35 @@ Expr *find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel)
 
     /* We didn't find any suitable equivalence class expression */
     return NULL;
+}
+
+/*
+ * Detect whether we want to process an EquivalenceClass member.
+ *
+ * This is a callback for use by generate_implied_equalities_for_column.
+ */
+static bool
+ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
+                          EquivalenceClass *ec, EquivalenceMember *em,
+                          void *arg)
+{
+    ec_member_foreign_arg *state = (ec_member_foreign_arg *) arg;
+    Expr	   *expr = em->em_expr;
+
+    /*
+     * If we've identified what we're processing in the current scan, we only
+     * want to match that expression.
+     */
+    if (state->current != NULL)
+        return equal(expr, state->current);
+
+    /*
+     * Otherwise, ignore anything we've already processed.
+     */
+    if (list_member(state->already_used, expr))
+        return false;
+
+    /* This is the new target to process. */
+    state->current = expr;
+    return true;
 }
