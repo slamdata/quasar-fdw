@@ -1,152 +1,158 @@
 /* Explain */
 /* Basic selection with limit */
 EXPLAIN (COSTS off) SELECT * FROM zips LIMIT 3;
-                       QUERY PLAN                        
----------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    ->  Foreign Scan on zips
-         Quasar query: SELECT city, pop, state FROM zips
+         Quasar query: SELECT "city", "pop", "state" FROM "zips"
 (3 rows)
 
 /* Select less fields than exist */
 EXPLAIN (COSTS off) SELECT city FROM zips LIMIT 1;
-                 QUERY PLAN                  
----------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Limit
    ->  Foreign Scan on zips
-         Quasar query: SELECT city FROM zips
+         Quasar query: SELECT "city" FROM "zips"
 (3 rows)
 
 /* Basic WHERE clause */
 EXPLAIN (COSTS off) SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on zips
-         Quasar query: SELECT city, pop, state FROM zips WHERE (state = 'CO')
+         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("state" = 'CO'))
 (3 rows)
 
 /* Nested selection */
 EXPLAIN (COSTS off) SELECT * FROM nested LIMIT 1;
-                                                           QUERY PLAN                                                           
---------------------------------------------------------------------------------------------------------------------------------
+                                                                           QUERY PLAN                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on nested
-         Quasar query: SELECT topObj.midObj.botObj.a AS a, topObj.midObj.botObj.b AS b, topObj.midObj.botObj.c AS c FROM nested
+         Quasar query: SELECT "topObj"."midObj"."botObj"."a" AS "a", "topObj"."midObj"."botObj"."b" AS "b", "topObj"."midObj"."botObj"."c" AS "c" FROM "nested"
 (3 rows)
 
 /* less fields than in relation, with one in a WHERE clause */
 EXPLAIN (COSTS off) SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on zips
-         Quasar query: SELECT city, state FROM zips WHERE (state = 'CO')
+         Quasar query: SELECT "city" FROM "zips" WHERE (("state" = 'CO'))
 (3 rows)
 
 EXPLAIN (COSTS off) SELECT city,pop FROM zips WHERE pop % 2 = 1 LIMIT 3;
-                               QUERY PLAN                               
-------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on zips
-         Quasar query: SELECT city, pop FROM zips WHERE ((pop % 2) = 1)
+         Quasar query: SELECT "city", "pop" FROM "zips" WHERE ((("pop" % 2) = 1))
 (3 rows)
 
 /* Test out array usage */
 EXPLAIN (COSTS off) SELECT * FROM zipsloc LIMIT 2;
-                   QUERY PLAN                    
--------------------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Limit
    ->  Foreign Scan on zipsloc
-         Quasar query: SELECT loc FROM smallZips
+         Quasar query: SELECT "loc" FROM "smallZips"
 (3 rows)
 
 /* Test out json usage */
 EXPLAIN (COSTS off) SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
-                          QUERY PLAN                          
---------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Limit
    ->  Foreign Scan on zipsjson
-         Quasar query: SELECT loc, loc AS locb FROM smallZips
+         Quasar query: SELECT "loc", "loc" AS "locb" FROM "smallZips"
 (3 rows)
 
 /* Pushdown regex operators */
 EXPLAIN (COSTS off) SELECT * FROM zips WHERE "state" LIKE 'A%' LIMIT 3;
-                                   QUERY PLAN                                    
----------------------------------------------------------------------------------
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on zips
-         Quasar query: SELECT city, pop, state FROM zips WHERE (state LIKE 'A%')
+         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("state" LIKE 'A%'))
 (3 rows)
 
 EXPLAIN (COSTS off) SELECT * FROM zips WHERE "city" !~~ 'B%' LIMIT 3;
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on zips
-         Quasar query: SELECT city, pop, state FROM zips WHERE (city NOT LIKE 'B%')
+         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("city" NOT LIKE 'B%'))
 (3 rows)
 
 /* pushdown math operators */
 EXPLAIN (COSTS off) SELECT * FROM zips WHERE pop > 1000 AND pop + pop <= 10000 LIMIT 3;
-                                              QUERY PLAN                                               
--------------------------------------------------------------------------------------------------------
+                                                       QUERY PLAN                                                        
+-------------------------------------------------------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on zips
-         Quasar query: SELECT city, pop, state FROM zips WHERE (pop > 1000) AND ((pop + pop) <= 10000)
+         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("pop" > 1000)) AND ((("pop" + "pop") <= 10000))
 (3 rows)
 
 /* join zips and zipsjson */
 EXPLAIN (COSTS off) SELECT zips.city AS city, pop, state, loc
                     FROM zips JOIN zipsjson ON zips.city = zipsjson.city
                     LIMIT 3;
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
  Limit
    ->  Nested Loop
          Join Filter: ((zips.city)::text = (zipsjson.city)::text)
          ->  Foreign Scan on zips
-               Quasar query: SELECT city, pop, state FROM zips
-         ->  Foreign Scan on zipsjson
-               Quasar query: SELECT city, loc FROM smallZips
-(7 rows)
+               Quasar query: SELECT "city", "pop", "state" FROM "zips"
+         ->  Materialize
+               ->  Foreign Scan on zipsjson
+                     Quasar query: SELECT "city", "loc" FROM "smallZips"
+(8 rows)
 
 /* query for a missing field */
 EXPLAIN (COSTS off) SELECT missing, city FROM zips_missing LIMIT 3;
-                        QUERY PLAN                         
------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Limit
    ->  Foreign Scan on zips_missing
-         Quasar query: SELECT city, missing FROM smallZips
+         Quasar query: SELECT "city", "missing" FROM "smallZips"
 (3 rows)
 
 /* No pushdown of `nopushdown` columns */
 EXPLAIN (COSTS off) SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52:37 2015';
-                                                                                             QUERY PLAN                                                                                             
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                              QUERY PLAN                                                                                                              
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Foreign Scan on commits
    Filter: (ts = 'Thu Jan 29 15:52:37 2015'::timestamp without time zone)
-   Quasar query: SELECT commit.author."date" AS ts, sha, commit.author.name AS author_name, commit.author.email AS author_email, url, commit.comment_count AS comment_count FROM slamengine_commits
+   Quasar query: SELECT "commit"."author"."date" AS "ts", "sha", "commit"."author"."name" AS "author_name", "commit"."author"."email" AS "author_email", "url", "commit"."comment_count" AS "comment_count" FROM "slamengine_commits"
 (3 rows)
 
 /* Pushdown of concat */
 EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 AND state LIKE concat('M'::char, '%'::char) LIMIT 5;
-                                             QUERY PLAN                                              
------------------------------------------------------------------------------------------------------
+                                                       QUERY PLAN                                                       
+------------------------------------------------------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on smallzips
          Filter: (state ~~ concat('M'::character(1), '%'::character(1)))
-         Quasar query: SELECT city, pop, state FROM smallZips WHERE (length(concat(state,city)) > 4)
+         Quasar query: SELECT "city", "pop", "state" FROM "smallZips" WHERE (("length"("concat"("state", "city")) > 4))
 (4 rows)
 
 /* pushdown of concat */
-EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 /* push down concat columns */
-                                            AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
-                                                            QUERY PLAN                                                             
------------------------------------------------------------------------------------------------------------------------------------
+EXPLAIN (COSTS off) SELECT * FROM smallzips
+        /* push down concat columns */
+        WHERE length(concat(state, city)) > 4
+        /* pushed down correctly */
+        AND state = concat('M'::char, 'A'::char)
+        /* push down concat operator */
+        AND 'B' || city LIKE 'B%' LIMIT 5;
+                                                                                            QUERY PLAN                                                                                             
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Limit
    ->  Foreign Scan on smallzips
-         Quasar query: SELECT city, pop, state FROM smallZips WHERE (length(concat(state,city)) > 4) AND (state = concat('M','A'))
+         Quasar query: SELECT "city", "pop", "state" FROM "smallZips" WHERE ((concat('B', "city") LIKE 'B%')) AND (("length"("concat"("state", "city")) > 4)) AND (("state" = "concat"('M', 'A')))
 (3 rows)
 
 /* LIKE operator only supports constant right sides */
@@ -155,36 +161,34 @@ EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '
 -------------------------------------------------------------------
  Foreign Scan on smallzips
    Filter: (state ~~ concat('B'::character(1), '%'::character(1)))
-   Quasar query: SELECT city, pop, state FROM smallZips
+   Quasar query: SELECT "city", "pop", "state" FROM "smallZips"
 (3 rows)
 
 /* ORDER BY pushdown */
 EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY length(city), pop DESC, state;
-                       QUERY PLAN                        
----------------------------------------------------------
- Sort
-   Sort Key: (length((city)::text)), pop, state
-   ->  Foreign Scan on zips
-         Quasar query: SELECT city, pop, state FROM zips
-(4 rows)
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
+ Foreign Scan on zips
+   Quasar query: SELECT "city", "pop", "state" FROM "zips" ORDER BY "length"("city") ASC, "pop" DESC, "state" ASC
+(2 rows)
 
 /* Can't pushdown NULLS FIRST */
 EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY state NULLS FIRST;
-                       QUERY PLAN                        
----------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Sort
    Sort Key: state
    ->  Foreign Scan on zips
-         Quasar query: SELECT city, pop, state FROM zips
+         Quasar query: SELECT "city", "pop", "state" FROM "zips"
 (4 rows)
 
 /* If one ORDER BY column can't be pushed down, none are */
 EXPLAIN (COSTS off) SELECT * FROM commits ORDER BY ts, sha;
-                                                                                                QUERY PLAN                                                                                                
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                 QUERY PLAN                                                                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Sort Key: ts, sha
    ->  Foreign Scan on commits
-         Quasar query: SELECT commit.author."date" AS ts, sha, commit.author.name AS author_name, commit.author.email AS author_email, url, commit.comment_count AS comment_count FROM slamengine_commits
+         Quasar query: SELECT "commit"."author"."date" AS "ts", "sha", "commit"."author"."name" AS "author_name", "commit"."author"."email" AS "author_email", "url", "commit"."comment_count" AS "comment_count" FROM "slamengine_commits"
 (4 rows)
 

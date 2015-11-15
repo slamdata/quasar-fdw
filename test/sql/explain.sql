@@ -30,8 +30,13 @@ EXPLAIN (COSTS off) SELECT * FROM commits WHERE ts = timestamp 'Thu Jan 29 15:52
 /* Pushdown of concat */
 EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 AND state LIKE concat('M'::char, '%'::char) LIMIT 5;
 /* pushdown of concat */
-EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 /* push down concat columns */
-                                            AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
+EXPLAIN (COSTS off) SELECT * FROM smallzips
+        /* push down concat columns */
+        WHERE length(concat(state, city)) > 4
+        /* pushed down correctly */
+        AND state = concat('M'::char, 'A'::char)
+        /* push down concat operator */
+        AND 'B' || city LIKE 'B%' LIMIT 5;
 /* LIKE operator only supports constant right sides */
 EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);
 /* ORDER BY pushdown */

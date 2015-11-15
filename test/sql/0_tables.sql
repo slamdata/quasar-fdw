@@ -1,6 +1,10 @@
 CREATE SERVER quasar FOREIGN DATA WRAPPER quasar_fdw
-       OPTIONS (server 'http://localhost:8080', path '/local/quasar'
-               ,timeout_ms '1001');
+       OPTIONS (server 'http://localhost:8080'
+               ,path '/local/quasar'
+               ,timeout_ms '1001'
+               ,use_remote_estimate 'false'
+               ,fdw_startup_cost '101'
+               ,fdw_tuple_cost '0.011');
 CREATE FOREIGN TABLE zips(city varchar, pop integer, state char(2))
        SERVER quasar OPTIONS (table 'zips');
 CREATE FOREIGN TABLE smallzips(city varchar, pop integer, state char(2))

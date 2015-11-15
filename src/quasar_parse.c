@@ -35,8 +35,10 @@
 #define COLUMN_LEVEL 1
 
 typedef struct parser {
-    TupleTableSlot *slot;
-    struct QuasarTable *table;
+    Datum *values;
+    bool *nulls;
+    AttInMetadata *attinmeta;
+
     size_t cur_col;
     bool record_complete;
     int level;
@@ -46,16 +48,15 @@ typedef struct parser {
 } parser;
 
 /* Utilities */
-static struct QuasarColumn *get_column(parser *p);
+static Form_pg_attribute get_column(parser *p);
 static bool is_array_type(parser *p);
 static bool is_json_type(parser *p);
 static void jsonAppendCommaIf(parser *p);
 static void arrayAppendCommaIf(parser *p);
 static void store_datum(parser *p, char *string, const char *fmt);
 static void store_null(parser *p);
-void finalize_tuple(quasar_parse_context *ctx, TupleTableSlot *slot);
 bool warncheck(parser *p);
-char *checkConversions(struct QuasarColumn *col, char *value);
+char *checkConversions(parser *p, char *value);
 
 /* Alloc callbacks */
 void *yajl_palloc(void *ctx, size_t sz);
@@ -74,28 +75,27 @@ static int cb_start_array(void * ctx);
 static int cb_end_array(void * ctx);
 
 bool warncheck(parser *p) {
-    struct QuasarColumn *col = get_column(p);
-    if (col->warn == 0) {
-        col->warn = 1;
+    if (p->warned == 0) {
+        p->warned = 1;
         return true;
     }
     return false;
 }
 
-static struct QuasarColumn *get_column(parser *p) {
-    if (p->cur_col != NO_COLUMN) {
-        return p->table->cols[p->cur_col];
+static Form_pg_attribute get_column(parser *p) {
+    if (p->cur_col != NO_COLUMN && p->cur_col < p->attinmeta->tupdesc->natts) {
+        return p->attinmeta->tupdesc->attrs[p->cur_col];
     } else {
         elog(ERROR, "quasar_fdw internal: Got a value when no column specified!");
     }
 }
 
 static bool is_array_type(parser *p) {
-    return get_column(p)->arrdims > 0;
+    return get_column(p)->attndims > 0;
 }
 
 static bool is_json_type(parser *p) {
-    switch(get_column(p)->pgtype) {
+    switch(get_column(p)->atttypid) {
     case JSONOID:
     case JSONBOID:
         return true;
@@ -130,11 +130,13 @@ static void jsonAppendCommaIf(parser *p) {
     }
 }
 
-char *checkConversions(struct QuasarColumn *col, char *value) {
-    if (col->arrdims > 0) return value;
+char *checkConversions(parser *p, char *value) {
+    Form_pg_attribute col = get_column(p);
+
+    if (col->attndims > 0) return value;
     size_t len = strlen(value);
 
-    switch (col->pgtype) {
+    switch (col->atttypid) {
     case INT2OID:
     case INT4OID:
         /* Sometimes we get floats with .0 from quasar for ints */
@@ -147,17 +149,18 @@ char *checkConversions(struct QuasarColumn *col, char *value) {
 }
 
 static void store_datum(parser *p, char *string, const char *fmt) {
-    struct QuasarColumn *col = get_column(p);
+    int i = p->cur_col;
 
-    elog(DEBUG3, "store_datum: level %d, %s", p->level, string);
+    elog(DEBUG4, "store_datum: level %d, %s", p->level, string);
 
-    if (p->level == COLUMN_LEVEL) {
-        string = checkConversions(col, string);
-        p->slot->tts_values[p->cur_col] =
-            InputFunctionCall(&col->typinput,
-                              string,
-                              col->typioparam,
-                              col->pgtypmod);
+    if (p->level == COLUMN_LEVEL &&
+        !get_column(p)->attisdropped) {
+        string = checkConversions(p, string);
+        p->values[i] = InputFunctionCall(&p->attinmeta->attinfuncs[i],
+                                         string,
+                                         p->attinmeta->attioparams[i],
+                                         p->attinmeta->atttypmods[i]);
+        p->nulls[i] = false;
     } else if (p->level > COLUMN_LEVEL && is_json_type(p)) {
         jsonAppendCommaIf(p);
         appendStringInfo(&p->json, fmt, string);
@@ -178,9 +181,8 @@ static void store_null(parser *p) {
         arrayAppendCommaIf(p);
         appendStringInfo(&p->array, "NULL");
     } else if (p->level == COLUMN_LEVEL) {
-        /* If the column is set, lets put this in the tuple */
-        p->slot->tts_values[p->cur_col] = PointerGetDatum(NULL);
-        p->slot->tts_isnull[p->cur_col] = true;
+        /* We initialize each field to null already... */
+        return;
     } else {
         elog(ERROR, "quasar_fdw internal: storing null when level is above columns");
     }
@@ -188,13 +190,13 @@ static void store_null(parser *p) {
 
 /* Yajl callbacks */
 static int cb_null(void * ctx) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
     store_null((parser*) ctx);
     return YAJL_OK;
 }
 
 static int cb_boolean(void * ctx, int boolean) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
     store_datum((parser*) ctx, boolean ? "true" : "false", "%s");
     return YAJL_OK;
 }
@@ -203,7 +205,7 @@ static int cb_boolean(void * ctx, int boolean) {
 static int cb_string(void * ctx,
                     const unsigned char * value,
                     size_t len) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
     char * s = pnstrdup((const char *)value, len);
     store_datum((parser*) ctx, s, "\"%s\"");
     pfree(s);
@@ -213,7 +215,7 @@ static int cb_string(void * ctx,
 static int cb_number(void * ctx,
                      const char * value,
                      size_t len) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
     char * s = pnstrdup(value, len);
     store_datum((parser*) ctx, s, "%s");
     pfree(s);
@@ -223,7 +225,7 @@ static int cb_number(void * ctx,
 static int cb_map_key(void * ctx,
                       const unsigned char * stringVal,
                       size_t stringLen) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
 
     parser *p = (parser*) ctx;
     size_t i;
@@ -232,8 +234,9 @@ static int cb_map_key(void * ctx,
     if (p->level == COLUMN_LEVEL) {
         /* Find the column */
         p->cur_col = NO_COLUMN;
-        for (i = 0; i < p->table->ncols; ++i) {
-            if (strcmp(s, p->table->cols[i]->pgname) == 0) {
+        for (i = 0; i < p->attinmeta->tupdesc->natts; ++i) {
+            if (strcmp(s, NameStr(p->attinmeta->tupdesc->attrs[i]->attname)) == 0)
+            {
                 p->cur_col = i;
                 break;
             }
@@ -252,10 +255,19 @@ static int cb_map_key(void * ctx,
 }
 
 static int cb_start_map(void * ctx) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
     parser *p = (parser*) ctx;
+    int i;
+
     if (p->level == TOP_LEVEL && p->record_complete) {
         return YAJL_CANCEL;
+    } else if (p->level == TOP_LEVEL) {
+        /* Reset our values */
+        for (i = 0; i < p->attinmeta->tupdesc->natts; ++i)
+        {
+            p->values[i] = PointerGetDatum(NULL);
+            p->nulls[i] = true;
+        }
     }
 
     if (p->level >= COLUMN_LEVEL) {
@@ -263,7 +275,7 @@ static int cb_start_map(void * ctx) {
             jsonAppendCommaIf(p);
             appendStringInfoChar(&p->json, '{');
         } else if (warncheck(p)) {
-            elog(WARNING, "quasar_fdw: column %s is scalar type but got json response.", get_column(p)->pgname);
+            elog(WARNING, "quasar_fdw: column %s is scalar type but got json response.", NameStr(get_column(p)->attname));
         }
     }
     p->level++;
@@ -272,7 +284,7 @@ static int cb_start_map(void * ctx) {
 
 
 static int cb_end_map(void * ctx) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
 
     parser *p = (parser*) ctx;
     if (p->level > COLUMN_LEVEL) {
@@ -287,7 +299,7 @@ static int cb_end_map(void * ctx) {
         if (p->json.len == 0) {
             store_null(p);
         } else {
-            elog(DEBUG3, "Parsed value for json json: %s", p->json.data);
+            elog(DEBUG4, "Parsed value for json json: %s", p->json.data);
             store_datum(p, pstrdup(p->json.data), "%s");
             resetStringInfo(&p->json);
         }
@@ -320,7 +332,7 @@ static int cb_end_array(void * ctx) {
         } else if (is_json_type(p)) {
             appendStringInfo(&p->json, "]");
         } else if (warncheck(p)) {
-            elog(WARNING, "quasar_fdw: column %s is scalar type but got json/array response.", get_column(p)->pgname);
+            elog(WARNING, "quasar_fdw: column %s is scalar type but got json/array response.", NameStr(get_column(p)->attname));
         }
     }
 
@@ -330,7 +342,7 @@ static int cb_end_array(void * ctx) {
         if (p->json.len == 0)
             store_null(p);
         else {
-            elog(DEBUG3, "Parsed value for deep json: %s", p->json.data);
+            elog(DEBUG4, "Parsed value for deep json: %s", p->json.data);
             store_datum(p, pstrdup(p->json.data), "%s");
             resetStringInfo(&p->json);
         }
@@ -338,7 +350,7 @@ static int cb_end_array(void * ctx) {
         if (p->array.len == 0) {
             store_null(p);
         } else {
-            elog(DEBUG3, "Parsed value for deep array: %s", p->array.data);
+            elog(DEBUG4, "Parsed value for deep array: %s", p->array.data);
             store_datum(p, pstrdup(p->array.data), "%s");
             resetStringInfo(&p->array);
         }
@@ -377,14 +389,16 @@ void yajl_pfree(void *ctx, void *ptr) {
 static yajl_alloc_funcs allocs = {yajl_palloc, yajl_repalloc, yajl_pfree, NULL};
 
 
-void quasar_parse_alloc(quasar_parse_context *ctx, struct QuasarTable *table) {
-    elog(DEBUG3, "entering function %s", __func__);
+void quasar_parse_alloc(quasar_parse_context *ctx, AttInMetadata *attinmeta) {
+    elog(DEBUG4, "entering function %s", __func__);
 
     parser *p = palloc(sizeof(parser));
     p->cur_col = NO_COLUMN;
-    p->table = table;
     p->level = TOP_LEVEL;
     p->record_complete = false;
+    p->attinmeta = attinmeta;
+    p->values = palloc(attinmeta->tupdesc->natts * sizeof(Datum));
+    p->nulls = palloc(attinmeta->tupdesc->natts * sizeof(bool));
     initStringInfo(&p->json);
     initStringInfo(&p->array);
     ctx->p = p;
@@ -394,16 +408,18 @@ void quasar_parse_alloc(quasar_parse_context *ctx, struct QuasarTable *table) {
     yajl_parse(ctx->handle, NULL, 0); /* Allocate the lexer inside yajl */
 }
 void quasar_parse_free(quasar_parse_context *ctx) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
 
     yajl_free(ctx->handle);
     pfree(((parser*)ctx->p)->json.data);
     pfree(((parser*)ctx->p)->array.data);
+    pfree(((parser*)ctx->p)->values);
+    pfree(((parser*)ctx->p)->nulls);
     pfree(ctx->p);
 }
 
 void quasar_parse_reset(quasar_parse_context *ctx) {
-    elog(DEBUG3, "entering function %s", __func__);
+    elog(DEBUG4, "entering function %s", __func__);
 
     parser *p = (parser*) ctx->p;
     p->cur_col = NO_COLUMN;
@@ -414,11 +430,14 @@ void quasar_parse_reset(quasar_parse_context *ctx) {
     yajl_reset(ctx->handle);
 }
 
-bool quasar_parse(quasar_parse_context *ctx,
-                  const char *buffer,
-                  size_t *buf_loc,
-                  size_t buf_size) {
-    elog(DEBUG3, "entering function %s", __func__);
+bool
+quasar_parse(quasar_parse_context *ctx,
+             const char *buffer,
+             size_t *buf_loc,
+             size_t buf_size,
+             HeapTuple *tuple)
+{
+    elog(DEBUG4, "entering function %s", __func__);
 
     bool found = false;
     parser *p = (parser*) ctx->p;
@@ -459,45 +478,8 @@ bool quasar_parse(quasar_parse_context *ctx,
     }
 
     if (found) {
-        finalize_tuple(ctx, ((parser*)ctx->p)->slot);
+        *tuple = heap_form_tuple(p->attinmeta->tupdesc, p->values, p->nulls);
     }
 
     return found;
-}
-
-bool quasar_parse_end(quasar_parse_context *ctx) {
-    elog(DEBUG3, "entering function %s", __func__);
-
-    /* yajl_complete_parse(ctx->handle); */
-    return ((parser*)ctx->p)->record_complete;
-}
-
-void quasar_parse_set_slot(quasar_parse_context *ctx, TupleTableSlot *slot) {
-    elog(DEBUG3, "entering function %s", __func__);
-
-    parser *p = (parser *) ctx->p;
-    int i;
-
-    for (i = p->table->ncols - 1; i >= 0; --i) {
-        if (!p->table->cols[i]->used) {
-            slot->tts_isnull[i] = true;
-            slot->tts_values[i] = PointerGetDatum(NULL);
-        } else {
-            slot->tts_isnull[i] = false;
-            slot->tts_values[i] = -1;
-        }
-    }
-
-    p->slot = slot;
-}
-
-void finalize_tuple(quasar_parse_context *ctx, TupleTableSlot *slot) {
-    int i;
-    parser *p = (parser*) ctx->p;
-    for (i = 0; i < p->table->ncols; ++i) {
-        if (slot->tts_values[i] == -1) {
-            slot->tts_values[i] = PointerGetDatum(NULL);
-            slot->tts_isnull[i] = true;
-        }
-    }
 }

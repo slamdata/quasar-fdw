@@ -3,7 +3,7 @@ CREATE SERVER o_quasar0 FOREIGN DATA WRAPPER quasar_fdw ;
 /* wrong options are illegal */
 CREATE SERVER o_quasar1 FOREIGN DATA WRAPPER quasar_fdw OPTIONS (wrong 'foo');
 ERROR:  invalid option "wrong"
-HINT:  Valid options in this context are: server, path, timeout_ms
+HINT:  Valid options in this context are: server, path, timeout_ms, use_remote_estimate, fdw_startup_cost, fdw_tuple_cost
 /* repeated options is illegal */
 CREATE SERVER o_quasar2 FOREIGN DATA WRAPPER quasar_fdw OPTIONS (server 'http://localhost:8080', path '/local/quasar', server 'http://localhost:8080');
 ERROR:  option "server" provided more than once

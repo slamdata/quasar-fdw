@@ -7,6 +7,9 @@ The main advantage of using this FDW over alternatives is that it takes full adv
 
 ## WIP Status
 
+11/14/2015:
+- I have completed the rewrite of the entire codebase to get to past functionality. With a bit more testing and improvement, we can get parameterized JOIN pushdown, query size estimation (required for JOIN pushdown), and EXPLAIN (VERBOSE on). ANALYZE is also in sight as an optional task.
+
 11/13/2015:
 - Even though [SQL/MED](https://wiki.postgresql.org/wiki/SQL/MED) claims ORDER BY clauses can't be pushed down, they can! I just got that to work.
 - After much reading through the `postgres_fdw`, I have figured out how to optimize JOINs. Essentially, we cannot ever fully push a JOIN down to Quasar. But we can optimize the queries to minimally scan the tables. Also to do this, I have to rewrite the entire query creation part of the system. I'm about 70% the way through that.

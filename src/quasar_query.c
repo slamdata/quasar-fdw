@@ -69,8 +69,7 @@ typedef struct deparse_expr_cxt
  * remote server.
  */
 static bool foreign_expr_walker(Node *node,
-                                foreign_glob_cxt *glob_cxt,
-                                foreign_loc_cxt *outer_cxt);
+                                foreign_glob_cxt *glob_cxt);
 
 /*
  * Functions to construct string representation of a node tree.
@@ -82,7 +81,7 @@ static void deparseTargetList(StringInfo buf,
                               Bitmapset *attrs_used,
                               List **retrieved_attrs);
 static void deparseColumnRef(StringInfo buf, int varno, int varattno,
-                             PlannerInfo *root);
+                             PlannerInfo *root, bool selector);
 static void deparseRelation(StringInfo buf, Relation rel);
 static void deparseExpr(Expr *expr, deparse_expr_cxt *context);
 static void deparseVar(Var *node, deparse_expr_cxt *context);
@@ -101,12 +100,12 @@ static void printRemoteParam(int paramindex, Oid paramtype, int32 paramtypmod,
                              deparse_expr_cxt *context);
 static void printRemotePlaceholder(Oid paramtype, int32 paramtypmod,
                                    deparse_expr_cxt *context);
-static char * quasar_quote_identifier(char *s);
+static char * quasar_quote_identifier(const char *s);
 
 /* Functions used for rendering query and checking quasar ability */
 bool quasar_has_const(Const *node);
 bool quasar_has_function(FuncExpr *func, char **name);
-bool quasar_has_op(OpExpr *op, char **name, char *opkind);
+bool quasar_has_op(OpExpr *op, char **name, char *opkind, bool *asfunc);
 bool quasar_has_scalar_array_op(ScalarArrayOpExpr *arrayoper, char **name);
 bool quasar_can_pushdown_column(int varno, int varattno, PlannerInfo *root);
 
@@ -133,9 +132,13 @@ classifyConditions(PlannerInfo *root,
         RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
 
         if (is_foreign_expr(root, baserel, ri->clause))
+        {
             *remote_conds = lappend(*remote_conds, ri);
+        }
         else
+        {
             *local_conds = lappend(*local_conds, ri);
+        }
     }
 }
 
@@ -148,7 +151,6 @@ is_foreign_expr(PlannerInfo *root,
                 Expr *expr)
 {
     foreign_glob_cxt glob_cxt;
-    foreign_loc_cxt loc_cxt;
 
     /*
      * Check that the expression consists of nodes that are safe to execute
@@ -156,27 +158,9 @@ is_foreign_expr(PlannerInfo *root,
      */
     glob_cxt.root = root;
     glob_cxt.foreignrel = baserel;
-    loc_cxt.collation = InvalidOid;
-    loc_cxt.state = FDW_COLLATE_NONE;
-    if (!foreign_expr_walker((Node *) expr, &glob_cxt, &loc_cxt))
+    if (!foreign_expr_walker((Node *) expr, &glob_cxt))
         return false;
 
-    /*
-     * If the expression has a valid collation that does not arise from a
-     * foreign var, the expression can not be sent over.
-     */
-    if (loc_cxt.state == FDW_COLLATE_UNSAFE)
-        return false;
-
-    /*
-     * An expression which includes any mutable functions can't be sent over
-     * because its result is not stable.  For example, sending now() remote
-     * side could cause confusion from clock offsets.  Future versions might
-     * be able to make this choice with more granularity.  (We check this last
-     * because it requires a lot of expensive catalog lookups.)
-     */
-    if (contain_mutable_functions((Node *) expr))
-        return false;
 
     /* OK to evaluate on the remote server */
     return true;
@@ -198,7 +182,7 @@ is_foreign_expr(PlannerInfo *root,
                           || (x) == INTERVALOID || (x) == BOOLOID)
 #define checkType(type) if (!canHandleType((type))) return false
 #define checkCollation(collid) if (collid != InvalidOid &&              \
-                                   collid != DEFAULT_COLLATION_ID) return false
+                                   collid != DEFAULT_COLLATION_OID) return false
 #define foreign_recurse(arg)\
     if (!foreign_expr_walker((Node *) (arg), glob_cxt)) \
         return false
@@ -222,7 +206,6 @@ static bool
 foreign_expr_walker(Node *node,
                     foreign_glob_cxt *glob_cxt)
 {
-    bool            check_type = true;
     QuasarFdwRelationInfo *fpinfo;
 
     /* Need do nothing for empty subexpressions */
@@ -258,7 +241,9 @@ foreign_expr_walker(Node *node,
                 return false;
 
             /* Check to make sure `nopushdown` is not enable for this column */
-            if (!quasar_can_pushdown_column(var->varno, var->varattno, glob_ctx->root))
+            if (!quasar_can_pushdown_column(var->varno,
+                                            var->varattno,
+                                            glob_cxt->root))
                 return false;
 
             checkCollation(var->varcollid);
@@ -302,7 +287,7 @@ foreign_expr_walker(Node *node,
             return false;
 
         /* Quasar can only handle single element references, not slicing */
-        if (ar->reflowerindexexpr != NULL) {
+        if (ar->reflowerindexpr != NULL) {
             return false;
         }
 
@@ -345,7 +330,7 @@ foreign_expr_walker(Node *node,
         checkCollation(oe->opcollid);
 
         /* Similarly, only operators quasar has can be sent. */
-        if (!quasar_has_op(op, NULL))
+        if (!quasar_has_op(oe, NULL, NULL, NULL))
             return false;
 
         /*
@@ -361,7 +346,7 @@ foreign_expr_walker(Node *node,
         checkCollation(oe->inputcollid);
 
         if (!quasar_has_scalar_array_op(oe, NULL))
-            return null;
+            return false;
 
         foreign_recurse(oe->args);
     }
@@ -435,8 +420,11 @@ foreign_expr_walker(Node *node,
  * Quasar name may be different from PG name
  */
 bool quasar_has_function(FuncExpr *func, char **name) {
+    char *opername;
+    Oid schema;
+
     /* get function name and schema */
-    tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func->funcid));
+    HeapTuple tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func->funcid));
     if (! HeapTupleIsValid(tuple))
     {
         elog(ERROR, "cache lookup failed for function %u", func->funcid);
@@ -500,13 +488,11 @@ bool quasar_has_const(Const *node) {
         bool typisvarlena;
         char *value;
 
-        getTypeOutuputInfo(node->consttype, &typoutput, &typisvarlena);
+        getTypeOutputInfo(node->consttype, &typoutput, &typisvarlena);
         value = OidOutputFunctionCall(typoutput, node->constvalue);
 
         if (strcmp(value, "NaN") == 0)
             return false;
-
-        return true;
     }
     break;
     }
@@ -519,9 +505,12 @@ bool quasar_has_const(Const *node) {
  * If opkind is not NULL, put the opkind in it
  * Quasar name may be different from PG name
  */
-bool quasar_has_op(OpExpr *oper, char **name, char *opkind) {
+bool quasar_has_op(OpExpr *oper, char **name, char *opkind, bool *asfunc) {
+    Oid schema, leftargtype, rightargtype;
+    char *opername, oprkind;
+
     /* get operator name, kind, argument type and schema */
-    tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(oper->opno));
+    HeapTuple tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(oper->opno));
     if (! HeapTupleIsValid(tuple))
     {
         elog(ERROR, "cache lookup failed for operator %u", oper->opno);
@@ -563,15 +552,23 @@ bool quasar_has_op(OpExpr *oper, char **name, char *opkind) {
         || strcmp(opername, "~*") == 0 /* case-insensitive posix-regex */
         || strcmp(opername, "!~*") == 0 /* case-insensititve NOT posix-regex */
         || strcmp(opername, "%") == 0 /* modulus */
+        || strcmp(opername, "||") == 0 /* Text Concatenation */
         )
     {
-        if (name != NULL) {
+        if (name != NULL && asfunc != NULL) {
+            *asfunc = false;
+
             if (oprkind == 'b') /* BINARY OPERATIONS */
             {
                 if (strcmp(opername, "~~") == 0)
                     *name = pstrdup("LIKE");
-                else if (strcmp(opername, "!~~"))
+                else if (strcmp(opername, "!~~") == 0)
                     *name = pstrdup("NOT LIKE");
+                else if (strcmp(opername, "||") == 0)
+                {
+                    *name = pstrdup("concat");
+                    *asfunc = true;
+                }
                 else
                     *name = pstrdup(opername);
             }
@@ -597,7 +594,11 @@ bool quasar_has_op(OpExpr *oper, char **name, char *opkind) {
  * If name is not NULL, put the operator name into it
  * Quasar name may be different from PG name
  */
-bool quasar_has_scalar_array_op(OpExpr *oper, char **name) {
+bool quasar_has_scalar_array_op(ScalarArrayOpExpr *arrayoper, char **name) {
+    char *opername;
+    Oid leftargtype, schema;
+    HeapTuple tuple;
+
     /* get operator name, left argument type and schema */
     tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(arrayoper->opno));
     if (! HeapTupleIsValid(tuple))
@@ -676,7 +677,8 @@ deparseSelectSql(StringInfo buf,
                  PlannerInfo *root,
                  RelOptInfo *baserel,
                  Bitmapset *attrs_used,
-                 List **retrieved_attrs)
+                 List **retrieved_attrs,
+                 bool sizeEstimate)
 {
     RangeTblEntry *rte = planner_rt_fetch(baserel->relid, root);
     Relation        rel;
@@ -691,8 +693,12 @@ deparseSelectSql(StringInfo buf,
      * Construct SELECT list
      */
     appendStringInfoString(buf, "SELECT ");
-    deparseTargetList(buf, root, baserel->relid, rel, attrs_used,
-                      retrieved_attrs);
+
+    if (sizeEstimate)
+        appendStringInfoString(buf, "count(*)");
+    else
+        deparseTargetList(buf, root, baserel->relid, rel, attrs_used,
+                          retrieved_attrs);
 
     /*
      * Construct FROM clause
@@ -746,7 +752,7 @@ deparseTargetList(StringInfo buf,
                 appendStringInfoString(buf, ", ");
             first = false;
 
-            deparseColumnRef(buf, rtindex, i, root);
+            deparseColumnRef(buf, rtindex, i, root, true);
 
             *retrieved_attrs = lappend_int(*retrieved_attrs, i);
         }
@@ -815,10 +821,10 @@ appendWhereClause(StringInfo buf,
  * If it has a column_name FDW option, use that instead of attribute name.
  */
 static void
-deparseColumnRef(StringInfo buf, int varno, int varattno, PlannerInfo *root)
+deparseColumnRef(StringInfo buf, int varno, int varattno, PlannerInfo *root, bool selector)
 {
     RangeTblEntry *rte;
-    char       *colname = NULL;
+    char *quasarname = NULL, *pgname;
     List       *options;
     ListCell   *lc;
 
@@ -839,19 +845,24 @@ deparseColumnRef(StringInfo buf, int varno, int varattno, PlannerInfo *root)
 
         if (strcmp(def->defname, "map") == 0)
         {
-            colname = defGetString(def);
+            quasarname = defGetString(def);
             break;
         }
     }
 
-    /*
-     * If it's a column of a regular table or it doesn't have column_name FDW
-     * option, use attribute name.
-     */
-    if (colname == NULL)
-        colname = get_relid_attribute_name(rte->relid, varattno);
+    /* Set the pgname */
+    pgname = get_relid_attribute_name(rte->relid, varattno);
 
-    appendStringInfoStringbuf, quasar_quote_identifier(colname);
+    /* If we are in the selector part of the query
+     * AND we are mapping the name, emit AS syntax */
+    if (selector && quasarname != NULL) {
+        appendStringInfo(buf, "%s AS %s", quasar_quote_identifier(quasarname),
+                         quasar_quote_identifier(pgname));
+    } else {
+        appendStringInfoString(
+            buf,
+            quasar_quote_identifier(quasarname != NULL ? quasarname : pgname));
+    }
 }
 
 /*
@@ -981,7 +992,7 @@ deparseVar(Var *node, deparse_expr_cxt *context)
         node->varlevelsup == 0)
     {
         /* Var belongs to foreign table */
-        deparseColumnRef(buf, node->varno, node->varattno, context->root);
+        deparseColumnRef(buf, node->varno, node->varattno, context->root, false);
     }
     else
     {
@@ -1027,7 +1038,6 @@ deparseConst(Const *node, deparse_expr_cxt *context)
     bool            typIsVarlena;
     char       *extval;
     bool            isfloat = false;
-    bool            needlabel;
 
     if (node->constisnull)
     {
@@ -1172,12 +1182,10 @@ deparseArrayRef(ArrayRef *node, deparse_expr_cxt *context)
 static void
 deparseFuncExpr(FuncExpr *node, deparse_expr_cxt *context)
 {
-    StringInfo      buf = context->buf;
-    HeapTuple       proctup;
+    StringInfo buf = context->buf;
     char *funcname;
-    bool            use_variadic;
-    bool            first;
-    ListCell   *arg;
+    bool first;
+    ListCell *arg;
 
     /*
      * If the function call came from an implicit coercion, then just show the
@@ -1216,39 +1224,52 @@ deparseOpExpr(OpExpr *node, deparse_expr_cxt *context)
     StringInfo      buf = context->buf;
     char *opname;
     char oprkind;
+    bool asfunc;
     ListCell   *arg;
 
     /* Get the quasar operation name */
-    quasar_has_op(node, &opname, &oprkind);
+    quasar_has_op(node, &opname, &oprkind, &asfunc);
 
     /* Sanity check. */
     Assert((oprkind == 'r' && list_length(node->args) == 1) ||
            (oprkind == 'l' && list_length(node->args) == 1) ||
            (oprkind == 'b' && list_length(node->args) == 2));
 
-    /* Always parenthesize the expression. */
-    appendStringInfoChar(buf, '(');
-
-    /* Deparse left operand. */
-    if (oprkind == 'r' || oprkind == 'b')
+    if (!asfunc)
     {
-        arg = list_head(node->args);
-        deparseExpr(lfirst(arg), context);
-        appendStringInfoChar(buf, ' ');
+        /* Always parenthesize the expression. */
+        appendStringInfoChar(buf, '(');
+
+        /* Deparse left operand. */
+        if (oprkind == 'r' || oprkind == 'b')
+        {
+            arg = list_head(node->args);
+            deparseExpr(lfirst(arg), context);
+            appendStringInfoChar(buf, ' ');
+        }
+
+        /* Insert the operator itself */
+        appendStringInfoString(buf, opname);
+
+        /* Deparse right operand. */
+        if (oprkind == 'l' || oprkind == 'b')
+        {
+            arg = list_tail(node->args);
+            appendStringInfoChar(buf, ' ');
+            deparseExpr(lfirst(arg), context);
+        }
+
+        appendStringInfoChar(buf, ')');
     }
-
-    /* Insert the operator itself */
-    appendStringInfoString(buf, opname);
-
-    /* Deparse right operand. */
-    if (oprkind == 'l' || oprkind == 'b')
+    else
     {
-        arg = list_tail(node->args);
-        appendStringInfoChar(buf, ' ');
-        deparseExpr(lfirst(arg), context);
+        appendStringInfoString(buf, opname);
+        appendStringInfoChar(buf, '(');
+        deparseExpr(linitial(node->args), context);
+        appendStringInfoString(buf, ", ");
+        deparseExpr(lsecond(node->args), context);
+        appendStringInfoChar(buf, ')');
     }
-
-    appendStringInfoChar(buf, ')');
 }
 
 /*
@@ -1258,9 +1279,9 @@ deparseOpExpr(OpExpr *node, deparse_expr_cxt *context)
 static void
 deparseScalarArrayOpExpr(ScalarArrayOpExpr *node, deparse_expr_cxt *context)
 {
-    StringInfo      buf = context->buf;
-    Expr       *arg1;
-    Expr       *arg2;
+    StringInfo buf = context->buf;
+    Expr *arg1;
+    Expr *arg2;
     char *opname;
 
     quasar_has_scalar_array_op(node, &opname);
@@ -1287,8 +1308,6 @@ deparseScalarArrayOpExpr(ScalarArrayOpExpr *node, deparse_expr_cxt *context)
 
     /* Always parenthesize the expression. */
     appendStringInfoChar(buf, ')');
-
-    ReleaseSysCache(tuple);
 }
 
 /*
@@ -1463,16 +1482,16 @@ typedef enum {
 } QuasarQuoteState;
 
 static char *
-quasar_quote_identifier(char *s) {
+quasar_quote_identifier(const char *s) {
     QuasarQuoteState state = QUOTE_STATE_DEFAULT;
     StringInfoData buf;
     initStringInfo(&buf);
 
-    fore (; *s != '\0'; ++s)
+    for (; *s != '\0'; ++s)
     {
         switch(state) {
         case QUOTE_STATE_DEFAULT:
-            switch(s) {
+            switch(*s) {
             case '.':
                 break;
             case '[':
@@ -1489,13 +1508,14 @@ quasar_quote_identifier(char *s) {
             }
             break;
         case QUOTE_STATE_IN_QUOTE:
-            switch(s) {
+            switch(*s) {
             case '.':
                 state = QUOTE_STATE_DEFAULT;
                 appendStringInfoChar(&buf, '"');
                 break;
             case '[':
                 state = QUOTE_STATE_IN_ARRAYREF;
+                appendStringInfoChar(&buf, '"');
                 break;
             case '"':
                 state = QUOTE_STATE_DEFAULT;
@@ -1503,7 +1523,7 @@ quasar_quote_identifier(char *s) {
             }
             break;
         case QUOTE_STATE_IN_ARRAYREF:
-            switch(s) {
+            switch(*s) {
             case ']':
                 state = QUOTE_STATE_DEFAULT;
                 break;
@@ -1512,6 +1532,9 @@ quasar_quote_identifier(char *s) {
         }
         appendStringInfoChar(&buf, *s);
     }
+
+    if (state == QUOTE_STATE_IN_QUOTE)
+        appendStringInfoChar(&buf, '"');
 
     return buf.data;
 }

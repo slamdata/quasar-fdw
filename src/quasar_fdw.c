@@ -88,6 +88,76 @@
 
 PG_MODULE_MAGIC;
 
+/*
+ * Indexes of FDW-private information stored in fdw_private lists.
+ *
+ * We store various information in ForeignScan.fdw_private to pass it from
+ * planner to executor.  Currently we store:
+ *
+ * 1) SELECT statement text to be sent to the remote server
+ * 2) Integer list of attribute numbers retrieved by the SELECT
+ *
+ * These items are indexed with the enum FdwScanPrivateIndex, so an item
+ * can be fetched with list_nth().  For example, to get the SELECT statement:
+ *              sql = strVal(list_nth(fdw_private, FdwScanPrivateSelectSql));
+ */
+enum FdwScanPrivateIndex
+{
+    /* SQL statement to execute remotely (as a String node) */
+    FdwScanPrivateSelectSql,
+    /* Integer list of attribute numbers retrieved by the SELECT */
+    FdwScanPrivateRetrievedAttrs
+};
+
+/*
+ * Execution state of a foreign scan using quasar_fdw
+ */
+typedef struct QuasarFdwScanState
+{
+    /* extracted fdw_private data */
+    char           *query;                      /* text of SELECT command */
+    List           *retrieved_attrs;    /* list of retrieved attribute numbers */
+
+    int             numParams;              /* number of parameters passed to query */
+    FmgrInfo       *param_flinfo;   /* output conversion functions for them */
+    List           *param_exprs;        /* executable expressions for param values */
+    const char    **param_values;  /* textual values of query parameters */
+
+    QuasarConn *conn;
+} QuasarFdwScanState;
+
+/*
+ * Workspace for analyzing a foreign table.
+ */
+typedef struct PgFdwAnalyzeState
+{
+    Relation       rel;         /* relcache entry for the foreign table */
+    AttInMetadata *attinmeta;   /* attribute datatype conversion metadata */
+    List          *retrieved_attrs;    /* attr numbers retrieved by query */
+
+    /* collected sample rows */
+    HeapTuple  *rows;                   /* array of size targrows */
+    int         targrows;               /* target # of sample rows */
+    int         numrows;                /* # of sample rows collected */
+
+    /* for random sampling */
+    double      samplerows;             /* # of rows fetched */
+    double      rowstoskip;             /* # of rows to skip before next sample */
+
+    /* working memory contexts */
+    MemoryContext anl_cxt;              /* context for per-analyze lifespan data */
+    MemoryContext temp_cxt;             /* context for per-tuple temporary data */
+} PgFdwAnalyzeState;
+
+/*
+ * Identify the attribute where data conversion fails.
+ */
+typedef struct ConversionLocation
+{
+    Relation    rel;                    /* foreign table's relcache entry */
+    AttrNumber  cur_attno;              /* attribute number being processed, or 0 */
+} ConversionLocation;
+
 /* Callback argument for ec_member_matches_foreign */
 typedef struct
 {
@@ -137,29 +207,22 @@ static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es);
 
 
 /*
- * Curl functions
- */
-void cleanup_curl(struct QuasarFdwExecState *festate);
-void execute_curl(struct QuasarFdwExecState *festate);
-static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf);
-static size_t body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
-
-
-
-/*
  * Private functions
  */
-void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan);
-struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt);
-void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable);
-char *getQuasarClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params);
-List *serializePlanState(struct QuasarFdwPlanState *fdwState);
-struct QuasarFdwPlanState *deserializePlanState(List *l);
-static char *datumToString(Datum datum, Oid type);
-Expr *find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel);
+static void estimate_path_cost_size(PlannerInfo *root,
+                                    RelOptInfo *baserel,
+                                    List *join_conds,
+                                    List *pathkeys,
+                                    double *p_rows,
+                                    int *p_width,
+                                    Cost *p_startup_cost,
+                                    Cost *p_total_cost);
 static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
                                       EquivalenceClass *ec, EquivalenceMember *em,
                                       void *arg);
+static void renderParams(QuasarFdwScanState *fsstate,
+                         ExprContext *econtext);
+
 
 /*
  * _PG_init
@@ -170,11 +233,7 @@ static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
 void
 _PG_init(void)
 {
-#ifdef _WIN32
-    curl_global_init(CURL_GLOBAL_WIN32);
-#else
-    curl_global_init(CURL_GLOBAL_NOTHING);
-#endif
+    QuasarGlobalConnectionInit();
 }
 
 Datum
@@ -209,7 +268,6 @@ quasar_fdw_handler(PG_FUNCTION_ARGS)
 }
 
 
-#if (PG_VERSION_NUM >= 90200)
 static void
 quasarGetForeignRelSize(PlannerInfo *root,
                         RelOptInfo *baserel,
@@ -232,24 +290,151 @@ quasarGetForeignRelSize(PlannerInfo *root,
        * can compute a better estimate of the average result row width.
        */
 
-      QuasarFdwPlanState *fdwPlan;
+    QuasarFdwRelationInfo *fpinfo;
+    ListCell   *lc;
 
-      elog(DEBUG1, "entering function %s", __func__);
 
-      baserel->rows = 0;
+    elog(DEBUG1, "entering function %s", __func__);
 
-      fdwPlan = palloc0(sizeof(QuasarFdwPlanState));
-      baserel->fdw_private = (void *) fdwPlan;
-      fdwPlan->params = NIL;
+    /*
+     * We use PgFdwRelationInfo to pass various information to subsequent
+     * functions.
+     */
+    fpinfo = (QuasarFdwRelationInfo *) palloc0(sizeof(QuasarFdwRelationInfo));
+    baserel->fdw_private = (void *) fpinfo;
 
-      /* initialize required state in fdw_private */
+    /* Look up foreign-table catalog info. */
+    fpinfo->table = GetForeignTable(foreigntableid);
+    fpinfo->server = GetForeignServer(fpinfo->table->serverid);
 
-      QuasarOpt *opt = quasar_get_options(foreigntableid);
-      struct QuasarTable *qTable = getQuasarTable(foreigntableid, opt);
-      createQuery(root, baserel, qTable, fdwPlan);
-      fdwPlan->quasarTable = qTable;
-      fdwPlan->timeout_ms = opt->timeout_ms;
-      elog(DEBUG1, "quasar_fdw: query is %s", fdwPlan->query);
+    /*
+     * Extract user-settable option values.  Note that per-table setting of
+     * use_remote_estimate overrides per-server setting.
+     */
+    fpinfo->use_remote_estimate = false;
+    fpinfo->fdw_startup_cost = DEFAULT_FDW_STARTUP_COST;
+    fpinfo->fdw_tuple_cost = DEFAULT_FDW_TUPLE_COST;
+    fpinfo->shippable_extensions = NIL;
+
+    foreach(lc, fpinfo->server->options)
+    {
+        DefElem    *def = (DefElem *) lfirst(lc);
+
+        if (strcmp(def->defname, "use_remote_estimate") == 0)
+            fpinfo->use_remote_estimate = defGetBoolean(def);
+        else if (strcmp(def->defname, "fdw_startup_cost") == 0)
+            fpinfo->fdw_startup_cost = strtod(defGetString(def), NULL);
+        else if (strcmp(def->defname, "fdw_tuple_cost") == 0)
+            fpinfo->fdw_tuple_cost = strtod(defGetString(def), NULL);
+    }
+    foreach(lc, fpinfo->table->options)
+    {
+        DefElem    *def = (DefElem *) lfirst(lc);
+
+        if (strcmp(def->defname, "use_remote_estimate") == 0)
+        {
+            fpinfo->use_remote_estimate = defGetBoolean(def);
+            break;                            /* only need the one value */
+        }
+    }
+
+    /*
+     * Identify which baserestrictinfo clauses can be sent to the remote
+     * server and which can't.
+     */
+    classifyConditions(root, baserel, baserel->baserestrictinfo,
+                       &fpinfo->remote_conds, &fpinfo->local_conds);
+
+    /*
+     * Identify which attributes will need to be retrieved from the remote
+     * server.  These include all attrs needed for joins or final output, plus
+     * all attrs used in the local_conds.  (Note: if we end up using a
+     * parameterized scan, it's possible that some of the join clauses will be
+     * sent to the remote and thus we wouldn't really need to retrieve the
+     * columns used in them.  Doesn't seem worth detecting that case though.)
+     */
+    fpinfo->attrs_used = NULL;
+    pull_varattnos((Node *) baserel->reltargetlist, baserel->relid,
+                   &fpinfo->attrs_used);
+    foreach(lc, fpinfo->local_conds)
+    {
+        RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+        pull_varattnos((Node *) rinfo->clause, baserel->relid,
+                       &fpinfo->attrs_used);
+    }
+
+    /*
+     * Compute the selectivity and cost of the local_conds, so we don't have
+     * to do it over again for each path.  The best we can do for these
+     * conditions is to estimate selectivity on the basis of local statistics.
+     */
+    fpinfo->local_conds_sel = clauselist_selectivity(root,
+                                                     fpinfo->local_conds,
+                                                     baserel->relid,
+                                                     JOIN_INNER,
+                                                     NULL);
+
+    cost_qual_eval(&fpinfo->local_conds_cost, fpinfo->local_conds, root);
+
+    /*
+     * If the table or the server is configured to use remote estimates,
+     * connect to the foreign server and execute EXPLAIN to estimate the
+     * number of rows selected by the restriction clauses, as well as the
+     * average row width.  Otherwise, estimate using whatever statistics we
+     * have locally, in a way similar to ordinary tables.
+     */
+    if (fpinfo->use_remote_estimate)
+    {
+        /*
+         * Get cost/size estimates with help of remote server.  Save the
+         * values in fpinfo so we don't need to do it again to generate the
+         * basic foreign path.
+         */
+        estimate_path_cost_size(root, baserel, NIL, NIL,
+                                       &fpinfo->rows, &fpinfo->width,
+                                       &fpinfo->startup_cost,
+                                       &fpinfo->total_cost);
+
+        /* Report estimated baserel size to planner. */
+        baserel->rows = fpinfo->rows;
+        baserel->width = fpinfo->width;
+    }
+    else
+    {
+        /*
+         * If the foreign table has never been ANALYZEd, it will have relpages
+         * and reltuples equal to zero, which most likely has nothing to do
+         * with reality.  We can't do a whole lot about that if we're not
+         * allowed to consult the remote server, but we can use a hack similar
+         * to plancat.c's treatment of empty relations: use a minimum size
+         * estimate of 10 pages, and divide by the column-datatype-based width
+         * estimate to get the corresponding number of tuples.
+         */
+        if (baserel->pages == 0 && baserel->tuples == 0)
+        {
+            baserel->pages = 10;
+#if (PG_VERSION_NUM >= 90500)
+            baserel->tuples =
+                (10 * BLCKSZ) / (baserel->width +
+                                 MAXALIGN(SizeofHeapTupleHeader));
+#else
+            baserel->tuples =
+                (10 * BLCKSZ) / (baserel->width +
+                                 sizeof(HeapTupleHeaderData));
+#endif
+
+        }
+
+        /* Estimate baserel size as best we can with local statistics. */
+        set_baserel_size_estimates(root, baserel);
+
+        /* Fill in basically-bogus cost estimates for use later. */
+        estimate_path_cost_size(root, baserel, NIL, NIL,
+                                       &fpinfo->rows, &fpinfo->width,
+                                       &fpinfo->startup_cost,
+                                       &fpinfo->total_cost);
+      }
 }
 
 static void
@@ -272,24 +457,259 @@ quasarGetForeignPaths(PlannerInfo *root,
        * that is needed to identify the specific scan method intended.
        */
 
-      QuasarFdwPlanState *fdwPlan = baserel->fdw_private;
+    QuasarFdwRelationInfo *fpinfo = (QuasarFdwRelationInfo *) baserel->fdw_private;
+    ForeignPath *path;
+    List        *ppi_list;
+    ListCell    *lc;
+    List        *usable_pathkeys = NIL;
 
-      Cost startup_cost, total_cost;
+    elog(DEBUG1, "entering function %s", __func__);
 
-      elog(DEBUG1, "entering function %s", __func__);
+    /*
+     * Create simplest ForeignScan path node and add it to baserel.  This path
+     * corresponds to SeqScan path of regular tables (though depending on what
+     * baserestrict conditions we were able to send to remote, there might
+     * actually be an indexscan happening there).  We already did all the work
+     * to estimate cost and size of this path.
+     */
+    path = create_foreignscan_path(root, baserel,
+                                   fpinfo->rows,
+                                   fpinfo->startup_cost,
+                                   fpinfo->total_cost,
+                                   NIL, /* no pathkeys */
+                                   NULL,                /* no outer rel either */
+                                   NIL);                /* no fdw_private list */
+    add_path(baserel, (Path *) path);
 
-      startup_cost = 100;
-      total_cost = startup_cost;
+    /*
+     * Determine whether we can potentially push query pathkeys to the remote
+     * side, avoiding a local sort.
+     */
+    foreach(lc, root->query_pathkeys)
+    {
+        PathKey    *pathkey = (PathKey *) lfirst(lc);
+        EquivalenceClass *pathkey_ec = pathkey->pk_eclass;
+        Expr       *em_expr;
 
-      /* Create a ForeignPath node and add it as only possible path */
-      add_path(baserel, (Path *)
-               create_foreignscan_path(root, baserel,
-                                       baserel->rows,
+        /*
+         * is_foreign_expr would detect volatile expressions as well, but
+         * ec_has_volatile saves some cycles.
+         */
+        if (!pathkey_ec->ec_has_volatile &&
+            /* Quasar doesn't support NULLS FIRST
+             * but DESC makes pk_nulls_first true regardless
+             */
+            (pathkey->pk_strategy != BTLessStrategyNumber ||
+             !pathkey->pk_nulls_first) &&
+            (em_expr = find_em_expr_for_rel(pathkey_ec, baserel)) &&
+            is_foreign_expr(root, baserel, em_expr))
+            usable_pathkeys = lappend(usable_pathkeys, pathkey);
+        else
+        {
+            /*
+             * The planner and executor don't have any clever strategy for
+             * taking data sorted by a prefix of the query's pathkeys and
+             * getting it to be sorted by all of those pathekeys.  We'll just
+             * end up resorting the entire data set.  So, unless we can push
+             * down all of the query pathkeys, forget it.
+             */
+            list_free(usable_pathkeys);
+            usable_pathkeys = NIL;
+            break;
+        }
+    }
+
+    /* Create a path with useful pathkeys, if we found one. */
+    if (usable_pathkeys != NULL)
+    {
+        double          rows;
+        int             width;
+        Cost            startup_cost;
+        Cost            total_cost;
+
+        estimate_path_cost_size(root, baserel, NIL, usable_pathkeys,
+                                       &rows, &width,
+                                       &startup_cost,
+                                       &total_cost);
+
+        add_path(baserel, (Path *)
+                 create_foreignscan_path(root, baserel,
+                                         rows,
+                                         startup_cost,
+                                         total_cost,
+                                         usable_pathkeys,
+                                         NULL,
+                                         NIL));
+    }
+
+    /*
+     * If we're not using remote estimates, stop here.  We have no way to
+     * estimate whether any join clauses would be worth sending across, so
+     * don't bother building parameterized paths.
+     */
+    if (!fpinfo->use_remote_estimate)
+        return;
+
+    /*
+     * Thumb through all join clauses for the rel to identify which outer
+     * relations could supply one or more safe-to-send-to-remote join clauses.
+     * We'll build a parameterized path for each such outer relation.
+     *
+     * It's convenient to manage this by representing each candidate outer
+     * relation by the ParamPathInfo node for it.  We can then use the
+     * ppi_clauses list in the ParamPathInfo node directly as a list of the
+     * interesting join clauses for that rel.  This takes care of the
+     * possibility that there are multiple safe join clauses for such a rel,
+     * and also ensures that we account for unsafe join clauses that we'll
+     * still have to enforce locally (since the parameterized-path machinery
+     * insists that we handle all movable clauses).
+     */
+    ppi_list = NIL;
+    foreach(lc, baserel->joininfo)
+    {
+        RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+        Relids          required_outer;
+        ParamPathInfo *param_info;
+
+        /* Check if clause can be moved to this rel */
+        if (!join_clause_is_movable_to(rinfo, baserel))
+            continue;
+
+        /* See if it is safe to send to remote */
+        if (!is_foreign_expr(root, baserel, rinfo->clause))
+            continue;
+
+        /* Calculate required outer rels for the resulting path */
+        required_outer = bms_union(rinfo->clause_relids,
+                                   baserel->lateral_relids);
+        /* We do not want the foreign rel itself listed in required_outer */
+        required_outer = bms_del_member(required_outer, baserel->relid);
+
+        /*
+         * required_outer probably can't be empty here, but if it were, we
+         * couldn't make a parameterized path.
+         */
+        if (bms_is_empty(required_outer))
+            continue;
+
+        /* Get the ParamPathInfo */
+        param_info = get_baserel_parampathinfo(root, baserel,
+                                               required_outer);
+        Assert(param_info != NULL);
+
+        /*
+         * Add it to list unless we already have it.  Testing pointer equality
+         * is OK since get_baserel_parampathinfo won't make duplicates.
+         */
+        ppi_list = list_append_unique_ptr(ppi_list, param_info);
+    }
+
+    /*
+     * The above scan examined only "generic" join clauses, not those that
+     * were absorbed into EquivalenceClauses.  See if we can make anything out
+     * of EquivalenceClauses.
+     */
+    if (baserel->has_eclass_joins)
+    {
+        /*
+         * We repeatedly scan the eclass list looking for column references
+         * (or expressions) belonging to the foreign rel.  Each time we find
+         * one, we generate a list of equivalence joinclauses for it, and then
+         * see if any are safe to send to the remote.  Repeat till there are
+         * no more candidate EC members.
+         */
+        ec_member_foreign_arg arg;
+
+        arg.already_used = NIL;
+        for (;;)
+        {
+            List           *clauses;
+
+            /* Make clauses, skipping any that join to lateral_referencers */
+            arg.current = NULL;
+            clauses = generate_implied_equalities_for_column(root,
+                                                             baserel,
+                                                             ec_member_matches_foreign,
+                                                             (void *) &arg,
+                                                             baserel->lateral_referencers);
+
+            /* Done if there are no more expressions in the foreign rel */
+            if (arg.current == NULL)
+            {
+                Assert(clauses == NIL);
+                break;
+            }
+
+            /* Scan the extracted join clauses */
+            foreach(lc, clauses)
+            {
+                RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+                Relids          required_outer;
+                ParamPathInfo *param_info;
+
+                /* Check if clause can be moved to this rel */
+                if (!join_clause_is_movable_to(rinfo, baserel))
+                    continue;
+
+                /* See if it is safe to send to remote */
+                if (!is_foreign_expr(root, baserel, rinfo->clause))
+                    continue;
+
+                /* Calculate required outer rels for the resulting path */
+                required_outer = bms_union(rinfo->clause_relids,
+                                           baserel->lateral_relids);
+                required_outer = bms_del_member(required_outer, baserel->relid);
+                if (bms_is_empty(required_outer))
+                    continue;
+
+                /* Get the ParamPathInfo */
+                param_info = get_baserel_parampathinfo(root, baserel,
+                                                       required_outer);
+                Assert(param_info != NULL);
+
+                /* Add it to list unless we already have it */
+                ppi_list = list_append_unique_ptr(ppi_list, param_info);
+            }
+
+            /* Try again, now ignoring the expression we found this time */
+            arg.already_used = lappend(arg.already_used, arg.current);
+        }
+    }
+
+    /*
+     * Now build a path for each useful outer relation.
+     */
+    foreach(lc, ppi_list)
+    {
+        ParamPathInfo *param_info = (ParamPathInfo *) lfirst(lc);
+        double         rows;
+        int            width;
+        Cost           startup_cost;
+        Cost           total_cost;
+
+        /* Get a cost estimate from the remote */
+        estimate_path_cost_size(root, baserel,
+                                       param_info->ppi_clauses, NIL,
+                                       &rows, &width,
+                                       &startup_cost,
+                                       &total_cost);
+
+        /*
+         * ppi_rows currently won't get looked at by anything, but still we
+         * may as well ensure that it matches our idea of the rowcount.
+         */
+        param_info->ppi_rows = rows;
+
+        /* Make the path */
+        path = create_foreignscan_path(root, baserel,
+                                       rows,
                                        startup_cost,
                                        total_cost,
-                                       fdwPlan->pathkeys,
-                                       NULL, /* fdwPlan->outer_rels, */
-                                       NIL));           /* no fdw_private data */
+                                       NIL,             /* no pathkeys */
+                                       param_info->ppi_req_outer,
+                                       NIL);    /* no fdw_private list */
+        add_path(baserel, (Path *) path);
+    }
 }
 
 
@@ -302,302 +722,295 @@ quasarGetForeignPlan(PlannerInfo *root,
                      List *tlist,
                      List *scan_clauses)
 {
-      /*
-       * Create a ForeignScan plan node from the selected foreign access path.
-       * This is called at the end of query planning. The parameters are as for
-       * GetForeignRelSize, plus the selected ForeignPath (previously produced
-       * by GetForeignPaths), the target list to be emitted by the plan node,
-       * and the restriction clauses to be enforced by the plan node.
-       *
-       * This function must create and return a ForeignScan plan node; it's
-       * recommended to use make_foreignscan to build the ForeignScan node.
-       *
-       */
+    /*
+     * Create a ForeignScan plan node from the selected foreign access path.
+     * This is called at the end of query planning. The parameters are as for
+     * GetForeignRelSize, plus the selected ForeignPath (previously produced
+     * by GetForeignPaths), the target list to be emitted by the plan node,
+     * and the restriction clauses to be enforced by the plan node.
+     *
+     * This function must create and return a ForeignScan plan node; it's
+     * recommended to use make_foreignscan to build the ForeignScan node.
+     *
+     */
 
-      elog(DEBUG1, "entering function %s", __func__);
+    QuasarFdwRelationInfo *fpinfo = (QuasarFdwRelationInfo *) baserel->fdw_private;
+    Index           scan_relid = baserel->relid;
+    List           *fdw_private;
+    List           *remote_conds = NIL;
+    List           *remote_exprs = NIL;
+    List           *local_exprs = NIL;
+    List           *params_list = NIL;
+    List           *retrieved_attrs;
+    StringInfoData  sql;
+    ListCell       *lc;
 
-      QuasarFdwPlanState *fdwPlan = (QuasarFdwPlanState*) baserel->fdw_private;
-      List * fdw_private = serializePlanState(fdwPlan);
-      List *keep_clauses = NIL;
-      ListCell *cell1, *cell2;
-      int i;
-      List *params = fdwPlan->params;
+    elog(DEBUG1, "entering function %s", __func__);
 
-      /* keep only those clauses that are not handled by Quasar */
-      foreach(cell1, scan_clauses)
-      {
-          i = 0;
-          foreach(cell2, baserel->baserestrictinfo)
-          {
-              if (equal(lfirst(cell1), lfirst(cell2)) && ! fdwPlan->pushdown_clauses[i])
-              {
-                  keep_clauses = lcons(lfirst(cell1), keep_clauses);
-                  break;
-              }
-              ++i;
-          }
-      }
+    /*
+     * Separate the scan_clauses into those that can be executed remotely and
+     * those that can't.  baserestrictinfo clauses that were previously
+     * determined to be safe or unsafe by classifyConditions are shown in
+     * fpinfo->remote_conds and fpinfo->local_conds.  Anything else in the
+     * scan_clauses list will be a join clause, which we have to check for
+     * remote-safety.
+     *
+     * Note: the join clauses we see here should be the exact same ones
+     * previously examined by postgresGetForeignPaths.  Possibly it'd be worth
+     * passing forward the classification work done then, rather than
+     * repeating it here.
+     *
+     * This code must match "extract_actual_clauses(scan_clauses, false)"
+     * except for the additional decision about remote versus local execution.
+     * Note however that we don't strip the RestrictInfo nodes from the
+     * remote_conds list, since appendWhereClause expects a list of
+     * RestrictInfos.
+     */
+    foreach(lc, scan_clauses)
+    {
+        RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
-      keep_clauses = extract_actual_clauses(keep_clauses, false);
+        Assert(IsA(rinfo, RestrictInfo));
 
+        /* Ignore any pseudoconstants, they're dealt with elsewhere */
+        if (rinfo->pseudoconstant)
+            continue;
 
-      pfree(fdwPlan);
-      baserel->fdw_private = NULL;
+        if (list_member_ptr(fpinfo->remote_conds, rinfo))
+        {
+            remote_conds = lappend(remote_conds, rinfo);
+            remote_exprs = lappend(remote_exprs, rinfo->clause);
+        }
+        else if (list_member_ptr(fpinfo->local_conds, rinfo))
+            local_exprs = lappend(local_exprs, rinfo->clause);
+        else if (is_foreign_expr(root, baserel, rinfo->clause))
+        {
+            remote_conds = lappend(remote_conds, rinfo);
+            remote_exprs = lappend(remote_exprs, rinfo->clause);
+        }
+        else
+            local_exprs = lappend(local_exprs, rinfo->clause);
+    }
 
-      /* Create the ForeignScan node */
+    /*
+     * Build the query string to be sent for execution, and identify
+     * expressions to be sent as parameters.
+     */
+    initStringInfo(&sql);
+    deparseSelectSql(&sql, root, baserel, fpinfo->attrs_used,
+                     &retrieved_attrs, false);
+    if (remote_conds)
+        appendWhereClause(&sql, root, baserel, remote_conds,
+                          true, &params_list);
+
+    /* Add ORDER BY clause if we found any useful pathkeys */
+    if (best_path->path.pathkeys)
+        appendOrderByClause(&sql, root, baserel, best_path->path.pathkeys);
+
+    /*
+     * Build the fdw_private list that will be available to the executor.
+     * Items in the list must match enum FdwScanPrivateIndex, above.
+     */
+    fdw_private = list_make2(makeString(sql.data),
+                             retrieved_attrs);
+
+    /*
+     * Create the ForeignScan node from target list, local filtering
+     * expressions, remote parameter expressions, and FDW private information.
+     *
+     * Note that the remote parameter expressions are stored in the fdw_exprs
+     * field of the finished plan node; we can't keep them in private state
+     * because then they wouldn't be subject to later planner processing.
+     */
 #if(PG_VERSION_NUM < 90500)
-      elog(DEBUG1, "make_foreignscan %d", baserel->relid);
-      return make_foreignscan(tlist,
-                              keep_clauses,
-                              baserel->relid,
-                              params,
-                              fdw_private);
+    elog(DEBUG1, "make_foreignscan %d", baserel->relid);
+    return make_foreignscan(tlist,
+                            local_exprs,
+                            scan_relid,
+                            params_list,
+                            fdw_private);
 #else
-      return make_foreignscan(tlist,
-                              keep_clauses,
-                              baserel->relid,
-                              params,
-                              fdw_private,
-                              NIL);
-#endif
+    return make_foreignscan(tlist,
+                            local_exprs,
+                            scan_relid,
+                            params_list,
+                            fdw_private,
+                            NIL,        /* no custom tlist */
+                            remote_exprs);
+#endif  /* PG_VERSION_NUM */
 }
-
-#endif
 
 
 static void
 quasarBeginForeignScan(ForeignScanState *node,
                        int eflags)
 {
-      /*
-       * Begin executing a foreign scan. This is called during executor startup.
-       * It should perform any initialization needed before the scan can start,
-       * but not start executing the actual scan (that should be done upon the
-       * first call to IterateForeignScan). The ForeignScanState node has
-       * already been created, but its fdw_state field is still NULL.
-       * Information about the table to scan is accessible through the
-       * ForeignScanState node (in particular, from the underlying ForeignScan
-       * plan node, which contains any FDW-private information provided by
-       * GetForeignPlan). eflags contains flag bits describing the executor's
-       * operating mode for this plan node.
-       *
-       * Note that when (eflags & EXEC_FLAG_EXPLAIN_ONLY) is true, this function
-       * should not perform any externally-visible actions; it should only do
-       * the minimum required to make the node state valid for
-       * ExplainForeignScan and EndForeignScan.
-       *
-       */
+    /*
+     * Begin executing a foreign scan. This is called during executor startup.
+     * It should perform any initialization needed before the scan can start,
+     * but not start executing the actual scan (that should be done upon the
+     * first call to IterateForeignScan). The ForeignScanState node has
+     * already been created, but its fdw_state field is still NULL.
+     * Information about the table to scan is accessible through the
+     * ForeignScanState node (in particular, from the underlying ForeignScan
+     * plan node, which contains any FDW-private information provided by
+     * GetForeignPlan). eflags contains flag bits describing the executor's
+     * operating mode for this plan node.
+     *
+     * Note that when (eflags & EXEC_FLAG_EXPLAIN_ONLY) is true, this function
+     * should not perform any externally-visible actions; it should only do
+     * the minimum required to make the node state valid for
+     * ExplainForeignScan and EndForeignScan.
+     *
+     */
+    ForeignScan *fsplan = (ForeignScan *)node->ss.ps.plan;
+    EState *estate = node->ss.ps.state;
+    QuasarFdwScanState *fsstate;
+    ForeignTable *table;
+    ForeignServer *server;
+    int numParams;
+    int i;
+    ListCell *lc;
+    Relation rel;
+    AttInMetadata *attinmeta;
 
-      elog(DEBUG1, "entering function %s", __func__);
+    elog(DEBUG1, "entering function %s", __func__);
 
-      /*
-       * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
-       */
-      if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
-          return;
+    /*
+     * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
+     */
+    if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+        return;
 
-      ForeignScan *fsplan = (ForeignScan *)node->ss.ps.plan;
-      QuasarFdwExecState *festate;
-      QuasarOpt *opt;
-      StringInfoData buf;
-      char       *query_encoded;
-      ExprContext *econtext;
-      MemoryContext oldcontext;
-      List *exec_params;
-      ListCell *cell;
-      int index;
-      struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
-      CURL *curl;
+    /*
+     * We'll save private state in node->fdw_state.
+     */
+    fsstate = (QuasarFdwScanState *) palloc0(sizeof(QuasarFdwScanState));
+    node->fdw_state = (void *) fsstate;
 
-      festate = (QuasarFdwExecState *) palloc0(sizeof(QuasarFdwExecState));
-      festate->parse_ctx = palloc0(sizeof(quasar_parse_context));
-      quasar_parse_alloc(festate->parse_ctx, plan->quasarTable);
+    /* Get info about foreign table. */
+    rel = node->ss.ss_currentRelation;
+    table = GetForeignTable(RelationGetRelid(rel));
+    server = GetForeignServer(table->serverid);
 
-      /* Setup curl */
-      curl = festate->curl = curl_easy_init();
-      festate->curlm = curl_multi_init();
-      festate->timeout_ms = plan->timeout_ms;
+    /*
+     * Get connection to the foreign server.
+     */
+    fsstate->conn = QuasarGetConnection(server);
 
-      /* Fetch options of foreign table */
-      opt = quasar_get_options(RelationGetRelid(node->ss.ss_currentRelation));
+    /* Get private info created by planner functions. */
+    fsstate->query = strVal(list_nth(fsplan->fdw_private,
+                                     FdwScanPrivateSelectSql));
 
-      /* Encode query */
-      query_encoded = curl_easy_escape(curl, plan->query, 0);
-      elog(DEBUG1, "encoding query %s -> %s", plan->query, query_encoded);
-      pfree(plan->query);
+    /* Get info we'll need for input data conversion. */
+    attinmeta = TupleDescGetAttInMetadata(RelationGetDescr(rel));
 
-      /* Make the url */
-      initStringInfo(&buf);
-      appendStringInfo(&buf, "%s/query/fs%s?q=%s",
-                       opt->server, opt->path, query_encoded);
-      curl_free(query_encoded);
+    /* Prepare our connection for a query */
+    QuasarPrepQuery(fsstate->conn, estate, attinmeta);
 
-      /* Execute any exec params and include in the query as quasar params */
-      econtext = node->ss.ps.ps_ExprContext;
-      /* switch to short lived memory context */
-      oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
-      index = 0;
-      exec_params = (List *)ExecInitExpr((Expr *)fsplan->fdw_exprs,
-                                         (PlanState *)node);
-      foreach(cell, exec_params) {
-          ExprState *expr = (ExprState *)lfirst(cell);
-          bool is_null;
+    /* prepare for output conversion of parameters used in remote query. */
+    numParams = list_length(fsplan->fdw_exprs);
+    fsstate->numParams = numParams;
+    fsstate->param_flinfo = (FmgrInfo *) palloc0(sizeof(FmgrInfo) * numParams);
 
-          /* count, but skip deleted entries */
-          ++index;
-          if (expr == NULL)
-              continue;
+    i = 0;
+    foreach(lc, fsplan->fdw_exprs)
+    {
+        Node       *param_expr = (Node *) lfirst(lc);
+        Oid         typefnoid;
+        bool        isvarlena;
 
-          /* Evaluate the expression */
-          Datum datum = ExecEvalExpr((ExprState *)expr, econtext, &is_null, NULL);
+        getTypeOutputInfo(exprType(param_expr), &typefnoid, &isvarlena);
+        fmgr_info(typefnoid, &fsstate->param_flinfo[i]);
+        i++;
+    }
 
-          /* Check for null */
-          if (is_null) {
-              elog(DEBUG1, "quasar_fdw: Parameter p%d = NULL", index);
-              appendStringInfo(&buf, "&p%d=null", index);
-          } else {
-              Oid type;
-              regproc typoutput;
-              bool typ_isvarlena;
-              FmgrInfo typoutput_info;
-              char *value, *value_encoded;
+    /*
+     * Prepare remote-parameter expressions for evaluation.  (Note: in
+     * practice, we expect that all these expressions will be just Params, so
+     * we could possibly do something more efficient than using the full
+     * expression-eval machinery for this.  But probably there would be little
+     * benefit, and it'd require postgres_fdw to know more than is desirable
+     * about Param evaluation.)
+     */
+    fsstate->param_exprs = (List *)
+        ExecInitExpr((Expr *) fsplan->fdw_exprs,
+                     (PlanState *) node);
 
-              /* Get type of expression */
-              type = exprType((Node *)(expr->expr));
-              /* Get output function reference */
-              getTypeOutputInfo(type, &typoutput, &typ_isvarlena);
-              /* Convert output function reference to FmgrInfo */
-              fmgr_info(typoutput, &typoutput_info);
-              /* Call output function on eval'ed expression */
-              value = OutputFunctionCall(&typoutput_info, datum);
+    /*
+     * Allocate buffer for text form of query parameters, if any.
+     */
+    if (numParams > 0)
+        fsstate->param_values = (const char **) palloc0(numParams * sizeof(char *));
+    else
+        fsstate->param_values = NULL;
 
-              /* Escape the value for putting in a query string */
-              value_encoded = curl_easy_escape(curl, value, 0);
-
-              /* Insert into the query string */
-              elog(DEBUG1, "quasar_fdw: Parameter p%d = %s", index, value);
-              appendStringInfo(&buf, "&p%d=%s", index, value_encoded);
-
-              curl_free(value_encoded); /* Cleanup of malloc'd memory. */
-              /* We don't have to clean up palloc'd memory
-                 (thats why we went into short-lived memory) */
-          }
-      }
-      /* reset memory context */
-      MemoryContextSwitchTo(oldcontext);
-
-      festate->url = buf.data;
-
-      /* cleanup after making url */
-      pfree(plan);
-
-      /* Execute the curl */
-      execute_curl(festate);
-
-      node->fdw_state = (void *) festate;
 }
-
 
 static TupleTableSlot *
 quasarIterateForeignScan(ForeignScanState *node)
 {
-      /*
-       * Fetch one row from the foreign source, returning it in a tuple table
-       * slot (the node's ScanTupleSlot should be used for this purpose). Return
-       * NULL if no more rows are available. The tuple table slot infrastructure
-       * allows either a physical or virtual tuple to be returned; in most cases
-       * the latter choice is preferable from a performance standpoint. Note
-       * that this is called in a short-lived memory context that will be reset
-       * between invocations. Create a memory context in BeginForeignScan if you
-       * need longer-lived storage, or use the es_query_cxt of the node's
-       * EState.
-       *
-       * The rows returned must match the column signature of the foreign table
-       * being scanned. If you choose to optimize away fetching columns that are
-       * not needed, you should insert nulls in those column positions.
-       *
-       * Note that PostgreSQL's executor doesn't care whether the rows returned
-       * violate any NOT NULL constraints that were defined on the foreign table
-       * columns — but the planner does care, and may optimize queries
-       * incorrectly if NULL values are present in a column declared not to
-       * contain them. If a NULL value is encountered when the user has declared
-       * that none should be present, it may be appropriate to raise an error
-       * (just as you would need to do in the case of a data type mismatch).
-       */
-
-    elog(DEBUG3, "entering function %s", __func__);
-
-    QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
-    TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-    int nfds;
-    bool finished_transfer = false;
-    int cc;
-    clock_t time;
-    long timeout_ms = festate->timeout_ms;
-
     /*
-     * The protocol for loading a virtual tuple into a slot is first
-     * ExecClearTuple, then fill the values/isnull arrays, then
-     * ExecStoreVirtualTuple.  If we don't find another row in the file, we
-     * just skip the last step, leaving the slot empty as required.
+     * Fetch one row from the foreign source, returning it in a tuple table
+     * slot (the node's ScanTupleSlot should be used for this purpose). Return
+     * NULL if no more rows are available. The tuple table slot infrastructure
+     * allows either a physical or virtual tuple to be returned; in most cases
+     * the latter choice is preferable from a performance standpoint. Note
+     * that this is called in a short-lived memory context that will be reset
+     * between invocations. Create a memory context in BeginForeignScan if you
+     * need longer-lived storage, or use the es_query_cxt of the node's
+     * EState.
      *
+     * The rows returned must match the column signature of the foreign table
+     * being scanned. If you choose to optimize away fetching columns that are
+     * not needed, you should insert nulls in those column positions.
+     *
+     * Note that PostgreSQL's executor doesn't care whether the rows returned
+     * violate any NOT NULL constraints that were defined on the foreign table
+     * columns — but the planner does care, and may optimize queries
+     * incorrectly if NULL values are present in a column declared not to
+     * contain them. If a NULL value is encountered when the user has declared
+     * that none should be present, it may be appropriate to raise an error
+     * (just as you would need to do in the case of a data type mismatch).
      */
 
-    ExecClearTuple(slot);
-    quasar_parse_set_slot(festate->parse_ctx, slot);
+    QuasarFdwScanState *fsstate = (QuasarFdwScanState *)node->fdw_state;
+    TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+    ExprContext *econtext = node->ss.ps.ps_ExprContext;
 
-    for (;;) {
+    elog(DEBUG4, "entering function %s", __func__);
 
-        /* Pull down more data when we don't have data */
-        if (festate->ongoing_transfers == 1
-            && festate->buffer_offset == festate->curl_ctx->buffer.len) {
-            elog(DEBUG3, "quasar_fdw: continuing curl transfer (timeout_ms %ld)", timeout_ms);
-            time = clock();
-
-            /* Basically select() on curl's internal fds */
-            cc = curl_multi_wait(festate->curlm, NULL, 0, timeout_ms, &nfds);
-            if (cc != CURLM_OK) {
-                cleanup_curl(festate);
-                elog(ERROR, "quasar_fdw: curl error %s", curl_multi_strerror(cc));
-            }
-
-            /* If nothing happened in timeout (after a first perform),
-               error out */
-            if ((clock() - time) / CLOCKS_PER_SEC * 1000 >= timeout_ms
-                && nfds == 0) {
-                cleanup_curl(festate);
-                elog(ERROR, "quasar_fdw: Timeout (%ld ms) contacting quasar.", timeout_ms);
-            }
-
-            /* Execute any necessary work for the request */
-            cc = curl_multi_perform(festate->curlm, &festate->ongoing_transfers);
-            if (cc != CURLM_OK) {
-                cleanup_curl(festate);
-                elog(ERROR, "quasar_fdw: curl error %s", curl_multi_strerror(cc));
-            }
-        } else if (finished_transfer) {
-            /* If we have finished the transfer and tried to parse another row
-             * but failed to find a tuple, we know that there are no more. */
-            return slot;
-        } else {
-            finished_transfer = true;
-        }
-
-        /* Parse any new buffer available */
-        if (festate->buffer_offset < festate->curl_ctx->buffer.len) {
-            /* Parse a row and store it if we find one */
-            if (quasar_parse(festate->parse_ctx,
-                             festate->curl_ctx->buffer.data,
-                             &festate->buffer_offset,
-                             festate->curl_ctx->buffer.len)) {
-                ExecStoreVirtualTuple(slot);
-                return slot;
-            }
-        }
-
+    /*
+     * If this is the first call after Begin or ReScan, we need to create the
+     * cursor on the remote side.
+     */
+    if (fsstate->conn->exec_transfer == 0) {
+        renderParams(fsstate, econtext);
+        QuasarExecuteQuery(fsstate->conn, fsstate->query,
+                           fsstate->param_values, fsstate->numParams);
     }
 
-    /* Shouldn't get here */
+    /*
+     * Get some more tuples, if we've run out.
+     */
+    if (fsstate->conn->qctx->next_tuple >= fsstate->conn->qctx->num_tuples)
+    {
+        QuasarContinueQuery(fsstate->conn);
+
+        /* If we didn't get any tuples, must be end of data. */
+        if (fsstate->conn->qctx->next_tuple >= fsstate->conn->qctx->num_tuples)
+            return ExecClearTuple(slot);
+    }
+
+
+    /*
+     * Return the next tuple.
+     */
+    ExecStoreTuple(fsstate->conn->qctx->tuples[fsstate->conn->qctx->next_tuple++],
+                   slot,
+                   InvalidBuffer,
+                   false);
+
     return slot;
 }
 
@@ -614,17 +1027,11 @@ quasarEndForeignScan(ForeignScanState *node)
 
       elog(DEBUG1, "entering function %s", __func__);
 
-      QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
+      QuasarFdwScanState *festate = (QuasarFdwScanState *) node->fdw_state;
+
       /* if festate is NULL, we are in EXPLAIN; nothing to do */
       if (festate) {
-          cleanup_curl(festate);
-
-          quasar_parse_free(festate->parse_ctx);
-          pfree(festate->parse_ctx);
-          pfree(festate->curl_ctx->buffer.data);
-          pfree(festate->curl_ctx);
-          pfree(festate->url);
-          pfree(festate);
+          QuasarCleanupConnection(festate->conn);
       }
 }
 
@@ -637,15 +1044,9 @@ quasarEndForeignScan(ForeignScanState *node)
      */
 
     elog(DEBUG1, "entering function %s", __func__);
-    QuasarFdwExecState *festate = (QuasarFdwExecState *) node->fdw_state;
+    QuasarFdwScanState *fsstate = (QuasarFdwScanState *) node->fdw_state;
 
-    /* Stop current request */
-    curl_multi_remove_handle(festate->curlm, festate->curl);
-    curl_easy_cleanup(festate->curl);
-
-    /* Start a new request */
-    festate->curl = curl_easy_init();
-    execute_curl(festate);
+    QuasarRewindQuery(fsstate->conn);
  }
 
 
@@ -654,1458 +1055,32 @@ quasarEndForeignScan(ForeignScanState *node)
  *              Produce extra output for EXPLAIN:
  *              the Quasar query
  */
-static void quasarExplainForeignScan(ForeignScanState *node, ExplainState *es) {
-    struct QuasarFdwPlanState *plan = deserializePlanState((List*) ((ForeignScan*)node->ss.ps.plan)->fdw_private);
-
+static void
+quasarExplainForeignScan(ForeignScanState *node, ExplainState *es)
+{
     elog(DEBUG1, "Entering function %s", __func__);
 
-    elog(DEBUG1, "quasar_fdw: explain foreign table scan on %d", RelationGetRelid(node->ss.ss_currentRelation));
+    List           *fdw_private;
+    char           *sql;
+    char           *mongo_query;
+    QuasarConn     *conn;
+    ForeignTable   *table;
+    ForeignServer  *server;
 
-    /* show query */
-    ExplainPropertyText("Quasar query", plan->query, es);
-}
+    fdw_private = ((ForeignScan *) node->ss.ps.plan)->fdw_private;
+    sql = strVal(list_nth(fdw_private, FdwScanPrivateSelectSql));
 
-void cleanup_curl(struct QuasarFdwExecState *festate) {
-    curl_multi_remove_handle(festate->curlm, festate->curl);
-    curl_easy_cleanup(festate->curl);
-    curl_multi_cleanup(festate->curlm);
-}
-
-void
-execute_curl(struct QuasarFdwExecState *festate) {
-    int sc;
-    CURL *curl = festate->curl;
-    CURLM *curlm = festate->curlm;
-
-    if (festate->curl_ctx == NULL) {
-        festate->curl_ctx = palloc0(sizeof(quasar_curl_context));
-        initStringInfo(&festate->curl_ctx->buffer);
-    } else {
-        festate->curl_ctx->status = 0;
-        resetStringInfo(&festate->curl_ctx->buffer);
-    }
-
-    /* Set up CURL instance. */
-    curl_easy_setopt(curl, CURLOPT_URL, festate->url);
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, festate->curl_ctx);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_handler);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, festate->curl_ctx);
-
-    elog(DEBUG1, "curling %s", festate->url);
-    sc = curl_multi_add_handle(curlm, curl);
-    if (sc != 0) {
-        /* Cleanup before exception */
-        cleanup_curl(festate);
-        elog(ERROR, "curl %s failed: %d", festate->url, sc);
-    }
-
-    festate->buffer_offset = 0;
-    festate->ongoing_transfers = 1;
-
-    /* Reset the parse context (for rescans) */
-    quasar_parse_reset(festate->parse_ctx);
-}
-
-/*
- * Curl callback functions
- */
-
-static size_t
-header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
-{
-    elog(DEBUG1, "entering function %s", __func__);
-    const char *HTTP_1_1 = "HTTP/1.1";
-    size_t      segsize = size * nmemb;
-    quasar_curl_context *ctx = (quasar_curl_context *) userp;
-
-    if (strncmp(buffer, HTTP_1_1, strlen(HTTP_1_1)) == 0)
+    ExplainPropertyText("Quasar query", sql, es);
+    if (es->verbose)
     {
-        int     status;
+        table = GetForeignTable(RelationGetRelid(node->ss.ss_currentRelation));
+        server = GetForeignServer(table->serverid);
+        conn = QuasarGetConnection(server);
 
-        status = atoi((char *) buffer + strlen(HTTP_1_1) + 1);
-        elog(DEBUG1, "curl response status %d", status);
-        ctx->status = status;
+        mongo_query = QuasarCompileQuery(conn, sql);
+        QuasarCleanupConnection(conn);
+        ExplainPropertyText("Compiled Mongo Query", mongo_query, es);
     }
-
-    return segsize;
-}
-
-static size_t
-body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
-{
-    elog(DEBUG3, "entering function %s", __func__);
-    size_t      segsize = size * nmemb;
-    quasar_curl_context *ctx = (quasar_curl_context *) userp;
-
-    if (ctx->status == 200) {
-        appendBinaryStringInfo(&ctx->buffer, buffer, segsize);
-    }
-    elog(DEBUG3, "wrote %ld bytes to curl buffer", segsize);
-
-    return segsize;
-}
-
-
-/* serializePlanState
- * serialize the Plan state in a List
- *
- * Notably, pushdown_clauses is not serialize because it isn't needed
- */
-List *serializePlanState(struct QuasarFdwPlanState *fdwState) {
-    int i;
-    List *l = list_make2(makeString(fdwState->query),
-                         makeInteger(fdwState->timeout_ms));
-
-    l = lappend(l, makeString(fdwState->quasarTable->name));
-    l = lappend(l, makeString(fdwState->quasarTable->pgname));
-    l = lappend(l, makeInteger(fdwState->quasarTable->ncols));
-    for (i=0; i<fdwState->quasarTable->ncols; ++i) {
-        struct QuasarColumn *col = fdwState->quasarTable->cols[i];
-        l = lappend(l, makeString(col->name));
-        l = lappend(l, makeString(col->pgname));
-        l = lappend(l, makeInteger(col->pgattnum));
-        l = lappend(l, makeInteger(col->pgtype));
-        l = lappend(l, makeInteger(col->pgtypmod));
-        l = lappend(l, makeInteger(col->arrdims));
-        l = lappend(l, makeInteger(col->used));
-    }
-
-    return l;
-}
-
-#define lcpop(fld) ((Value*)lfirst(lc))->val.fld; lc = lnext(lc)
-
-/* deserializePlanState
- * deserialize a list into a plan state
- *
- * Notably, pushdown_clauses is not deserialized because it isn't needed.
- */
-struct QuasarFdwPlanState *deserializePlanState(List *l) {
-    ListCell *lc = list_head(l);
-    int i;
-
-    struct QuasarFdwPlanState *state = palloc0(sizeof(struct QuasarFdwPlanState));
-    state->quasarTable = palloc0(sizeof(struct QuasarTable));
-
-    state->query = lcpop(str);
-    state->timeout_ms = lcpop(ival);
-    state->quasarTable->name = lcpop(str);
-    state->quasarTable->pgname = lcpop(str);
-    state->quasarTable->ncols = lcpop(ival);
-
-    state->quasarTable->cols = palloc0(state->quasarTable->ncols *
-                                       sizeof(struct QuasarColumn *));
-    for (i = 0; i < state->quasarTable->ncols; i++) {
-        struct QuasarColumn *col = palloc0(sizeof(struct QuasarColumn));
-        state->quasarTable->cols[i] = col;
-
-        col->name = lcpop(str);
-        col->pgname = lcpop(str);
-        col->pgattnum = lcpop(ival);
-        col->pgtype = (Oid) lcpop(ival);
-        col->pgtypmod = lcpop(ival);
-        col->arrdims = lcpop(ival);
-        col->used = lcpop(ival);
-
-        /* Fill out typinput and typioparam fields */
-        Oid in_func_oid;
-        getTypeInputInfo(col->pgtype, &in_func_oid, &col->typioparam);
-        fmgr_info(in_func_oid, &col->typinput);
-    }
-
-    return state;
-}
-
-
-/* getQuasarTable
- *     Retrieve information on a QuasarTable
- */
-struct QuasarTable *getQuasarTable(Oid foreigntableid, QuasarOpt *opt) {
-    Relation rel;
-    TupleDesc tupdesc;
-    int i, index;
-
-    elog(DEBUG1, "entering function %s", __func__);
-
-    struct QuasarTable *table = palloc(sizeof(struct QuasarTable));
-    table->pgname = get_rel_name(foreigntableid);
-    table->name = opt->table;
-
-    /* Grab the foreign table relation from the PostgreSQL catalog */
-    rel = heap_open(foreigntableid, NoLock);
-    tupdesc = rel->rd_att;
-
-    /* number of PostgreSQL columns */
-    table->ncols = tupdesc->natts;
-    elog(DEBUG1, "quasar_fdw table: pgname %s name %s ncols %d", table->pgname, table->name, table->ncols);
-
-    table->cols = palloc(table->ncols * sizeof(struct QuasarColumn *));
-
-    /* loop through foreign table columns */
-    index = 0;
-    for (i=0; i<tupdesc->natts; ++i)
-    {
-        Form_pg_attribute att_tuple = tupdesc->attrs[i];
-        List *options;
-        ListCell *option;
-
-        /* ignore dropped columns */
-        if (att_tuple->attisdropped)
-            continue;
-
-        ++index;
-        /* get PostgreSQL column number and type */
-        if (index <= table->ncols)
-        {
-            struct QuasarColumn *col = table->cols[index-1] = palloc0(sizeof(struct QuasarColumn));
-            col->pgattnum = att_tuple->attnum;
-            col->pgtype = att_tuple->atttypid;
-            col->pgtypmod = att_tuple->atttypmod;
-            col->arrdims = att_tuple->attndims;
-            col->pgname = pstrdup(NameStr(att_tuple->attname));
-            col->name = NULL;
-
-            /* loop through column options */
-            options = GetForeignColumnOptions(foreigntableid, att_tuple->attnum);
-            foreach(option, options)
-            {
-                DefElem *def = (DefElem *)lfirst(option);
-
-                /* Allow users to map column names */
-                if (strcmp(def->defname, "map") == 0)
-                {
-                    col->name = defGetString(def);
-                }
-
-                if (strcmp(def->defname, "nopushdown") == 0) {
-                    col->nopushdown = true;
-                }
-            }
-
-            if (col->name == NULL) {
-                col->name = pstrdup(col->pgname);
-            }
-
-            elog(DEBUG1, "quasar_fdw column: pgname %s name %s index %dnum %d atttypid %d addtypmod %d", col->pgname, col->name, index-1, col->pgattnum, col->pgtype, col->pgtypmod);
-        }
-    }
-
-    heap_close(rel, NoLock);
-
-    return table;
-}
-
-/*
- * createQuery
- *      Construct a query string for Quasar that
- *      a) contains only the necessary columns in the SELECT list
- *      b) has all the WHERE clauses that can safely be translated to Quasar.
- *      Untranslatable WHERE clauses are omitted and left for PostgreSQL to check.
- *      In "pushdown_clauses" an array is stored that contains "true" for all clauses
- *      that will be pushed down and "false" for those that are filtered locally.
- *      As a side effect, we also mark the used columns in quasarTable.
- */
-void createQuery(PlannerInfo *root, RelOptInfo *foreignrel, struct QuasarTable *quasarTable, QuasarFdwPlanState *plan)
-{
-    ListCell *cell;
-    bool first_col = true, in_quote = false;
-    int i, clause_count = -1, index;
-    StringInfoData query;
-    char *where, parname[10], *p;
-    List *columnlist = foreignrel->reltargetlist,
-        *conditions = foreignrel->baserestrictinfo;
-    struct QuasarColumn *col;
-    List **params = &plan->params;
-    bool **pushdown_clauses = &plan->pushdown_clauses;
-    List **usable_pathkeys = &plan->pathkeys;
-
-    elog(DEBUG1, "entering function %s", __func__);
-
-    /* examine each SELECT list entry for Var nodes */
-    foreach(cell, columnlist)
-    {
-        getUsedColumns((Expr *)lfirst(cell), quasarTable);
-    }
-
-    /* examine each condition for Var nodes */
-    foreach(cell, conditions)
-    {
-        getUsedColumns((Expr *)lfirst(cell), quasarTable);
-    }
-
-    /* construct SELECT list */
-    initStringInfo(&query);
-    appendStringInfo(&query, "SELECT ");
-    for (i=0; i<quasarTable->ncols; ++i)
-    {
-        col = quasarTable->cols[i];
-        if (col->used)
-        {
-            if (!first_col)
-            {
-                appendStringInfo(&query, ", ");
-            } else {
-                first_col = false;
-            }
-            if (strcmp(col->name, col->pgname) != 0) {
-                appendStringInfo(&query, "%s AS %s", col->name, col->pgname);
-            } else {
-                appendStringInfo(&query, "%s", col->name);
-            }
-        }
-    }
-
-    /* dummy column if there is no result column we need from Quasar */
-    if (first_col)
-        appendStringInfo(&query, "'1'");
-    appendStringInfo(&query, " FROM %s", quasarTable->name);
-
-    /* WHERE */
-    /* allocate enough space for pushdown_clauses */
-    if (conditions != NIL)
-    {
-        *pushdown_clauses = (bool *)palloc(sizeof(bool) * list_length(conditions));
-    }
-
-    /* append WHERE clauses */
-    first_col = true;
-    foreach(cell, conditions)
-    {
-        /* try to convert each condition to Oracle SQL */
-        where = getQuasarClause(foreignrel, ((RestrictInfo *)lfirst(cell))->clause, quasarTable, params);
-        if (where != NULL) {
-            /* append new WHERE clause to query string */
-            if (first_col)
-            {
-                first_col = false;
-                appendStringInfo(&query, " WHERE %s", where);
-            }
-            else
-            {
-                appendStringInfo(&query, " AND %s", where);
-            }
-            pfree(where);
-
-            (*pushdown_clauses)[++clause_count] = true;
-        }
-        else
-            (*pushdown_clauses)[++clause_count] = false;
-    }
-
-    List *ppi_list = NIL;
-    plan->outer_rels = NULL;
-    /* JOINs become parameterize WHERE */
-    foreach(cell, foreignrel->joininfo) {
-        RestrictInfo *rinfo = (RestrictInfo *) lfirst(cell);
-        Relids          required_outer;
-        ParamPathInfo *param_info;
-        char *joinpart;
-        int len = list_length(ppi_list);
-
-        /* Check if clause can be moved to this rel */
-        if (!join_clause_is_movable_to(rinfo, foreignrel))
-            continue;
-
-        /* See if it is safe to send to remote */
-        joinpart = getQuasarClause(foreignrel, rinfo->clause,
-                                   quasarTable, params);
-        if (joinpart == NULL)
-            continue;
-
-        /* Calculate required outer rels for the resulting path */
-        required_outer = bms_union(rinfo->clause_relids,
-                                   foreignrel->lateral_relids);
-        /* We do not want the foreign rel itself listed in required_outer */
-        required_outer = bms_del_member(required_outer, foreignrel->relid);
-
-        /*
-         * required_outer probably can't be empty here, but if it were, we
-         * couldn't make a parameterized path.
-         */
-        if (bms_is_empty(required_outer)) {
-            pfree(joinpart);
-            continue;
-        }
-
-        /* Get the ParamPathInfo */
-        param_info = get_baserel_parampathinfo(root, foreignrel, required_outer);
-        Assert(param_info != NULL);
-
-
-        /* If it was a successful addition, add it to the query */
-        if (len < list_length(ppi_list)) {
-            elog(DEBUG1, "Adding parameterized JOIN condition To query: %s", joinpart);
-            if (first_col) {
-                appendStringInfo(&query, " WHERE %s", joinpart);
-                first_col = false;
-            } else {
-                appendStringInfo(&query, " AND %s", joinpart);
-            }
-
-            plan->outer_rels = bms_union(plan->outer_rels, required_outer);
-        }
-        pfree(joinpart);
-    }
-
-    /*
-     * The above scan examined only "generic" join clauses, not those that
-     * were absorbed into EquivalenceClauses.  See if we can make anything out
-     * of EquivalenceClauses.
-     */
-    if (foreignrel->has_eclass_joins) {
-        /*
-         * We repeatedly scan the eclass list looking for column references
-         * (or expressions) belonging to the foreign rel.  Each time we find
-         * one, we generate a list of equivalence joinclauses for it, and then
-         * see if any are safe to send to the remote.  Repeat till there are
-         * no more candidate EC members.
-         */
-        ec_member_foreign_arg arg;
-
-        arg.already_used = NIL;
-        for (;;) {
-            List       *clauses;
-
-            /* Make clauses, skipping any that join to lateral_referencers */
-            arg.current = NULL;
-            clauses = generate_implied_equalities_for_column(root,
-                                                             foreignrel,
-                                                             ec_member_matches_foreign,
-                                                             (void *) &arg,
-                                                             foreignrel->lateral_referencers);
-
-            /* Done if there are no more expressions in the foreign rel */
-            if (arg.current == NULL) {
-                Assert(clauses == NIL);
-                break;
-            }
-
-            /* Scan the extracted join clauses */
-            foreach(cell, clauses) {
-                RestrictInfo *rinfo = (RestrictInfo *) lfirst(cell);
-                Relids          required_outer;
-                ParamPathInfo *param_info;
-                char *joinpart;
-                int len = list_length(ppi_list);
-
-                /* Check if clause can be moved to this rel */
-                if (!join_clause_is_movable_to(rinfo, foreignrel))
-                    continue;
-
-                /* See if it is safe to send to remote */
-                joinpart = getQuasarClause(foreignrel, rinfo->clause,
-                                           quasarTable, params);
-                if (joinpart == NULL)
-                    continue;
-
-                /* Calculate required outer rels for the resulting path */
-                required_outer = bms_union(rinfo->clause_relids,
-                                           foreignrel->lateral_relids);
-                required_outer = bms_del_member(required_outer, foreignrel->relid);
-                if (bms_is_empty(required_outer)) {
-                    pfree(joinpart);
-                    continue;
-                }
-
-                /* Get the ParamPathInfo */
-                param_info = get_baserel_parampathinfo(root, foreignrel,
-                                                       required_outer);
-                Assert(param_info != NULL);
-
-                /* Add it to list unless we already have it */
-                ppi_list = list_append_unique_ptr(ppi_list, param_info);
-
-                if (len < list_length(ppi_list)) {
-                    elog(DEBUG1, "Adding parameterized equivalence class join part: %s", joinpart);
-                    if (first_col) {
-                        appendStringInfo(&query, " WHERE %s", joinpart);
-                        first_col = false;
-                    } else {
-                        appendStringInfo(&query, " AND %s", joinpart);
-                    }
-
-                    plan->outer_rels = bms_union(plan->outer_rels, required_outer);
-                }
-                pfree(joinpart);
-            }
-
-            /* Try again, now ignoring the expression we found this time */
-            arg.already_used = lappend(arg.already_used, arg.current);
-        }
-    }
-
-    /*
-     * Push down ORDER BY and other sort clauses, known as "pathkeys" to Postgres
-     * This will avoid a local sort in PG.
-     */
-
-    StringInfoData orderby;
-    initStringInfo(&orderby);
-    first_col = true;
-    foreach(cell, root->query_pathkeys) {
-        PathKey    *pathkey = (PathKey *) lfirst(cell);
-        EquivalenceClass *pathkey_ec = pathkey->pk_eclass;
-        Expr       *em_expr;
-        char *querypart = NULL;
-
-        elog(DEBUG1, "Checking query_pathkey");
-
-        /*
-         * getQuasarClause would detect volatile expressions as well, but
-         * ec_has_volatile saves some cycles.
-         */
-        if (!pathkey_ec->ec_has_volatile && !pathkey->pk_nulls_first) {
-            em_expr = find_em_expr_for_rel(pathkey_ec, foreignrel);
-            if (em_expr) {
-                querypart = getQuasarClause(foreignrel, em_expr, quasarTable, params);
-            }
-        }
-
-        if (querypart != NULL) {
-            if (!first_col) appendStringInfoChar(&orderby, ',');
-            first_col = false;
-            appendStringInfo(&orderby, "%s", querypart);
-            *usable_pathkeys = lappend(*usable_pathkeys, pathkey);
-            pfree(querypart);
-
-            if (pathkey->pk_strategy == BTLessStrategyNumber)
-                appendStringInfoString(&orderby, " ASC");
-            else
-                appendStringInfoString(&orderby, " DESC");
-
-        } else {
-            /*
-             * The planner and executor don't have any clever strategy for
-             * taking data sorted by a prefix of the query's pathkeys and
-             * getting it to be sorted by all of those pathekeys.  We'll just
-             * end up resorting the entire data set.  So, unless we can push
-             * down all of the query pathkeys, forget it.
-             */
-            list_free(*usable_pathkeys);
-            *usable_pathkeys = NIL;
-            resetStringInfo(&orderby);
-            break;
-        }
-    }
-    if (*usable_pathkeys != NIL) {
-        appendStringInfo(&query, " ORDER BY %s", orderby.data);
-    }
-    pfree(orderby.data);
-
-    plan->query = pstrdup(query.data);
-
-    /* Remove string literals from this copy of the query */
-    for (p=query.data; *p!='\0'; ++p)
-    {
-        if (*p == '\'')
-            in_quote = ! in_quote;
-        if (in_quote)
-            *p = ' ';
-    }
-
-    /* remove all parameters that do not actually occur in the query */
-    index = 0;
-    foreach(cell, *params)
-    {
-        ++index;
-        snprintf(parname, 10, ":p%d", index);
-        if (strstr(query.data, parname) == NULL)
-        {
-            /* set the element to NULL to indicate it's gone */
-            lfirst(cell) = NULL;
-        }
-    }
-
-    pfree(query.data);
-}
-
-/*
- * getUsedColumns
- *      Set "used=true" in quasarTable for all columns used in the expression.
- */
-void getUsedColumns(Expr *expr, struct QuasarTable *quasarTable)
-{
-    ListCell *cell;
-    Var *variable;
-    int index;
-
-    elog(DEBUG1, "entering function %s", __func__);
-
-    if (expr == NULL)
-        return;
-
-    switch(expr->type)
-    {
-        case T_RestrictInfo:
-            elog(DEBUG2, "getUsedColumns: T_RestrictInfo");
-            getUsedColumns(((RestrictInfo *)expr)->clause, quasarTable);
-            break;
-        case T_TargetEntry:
-            elog(DEBUG2, "getUsedColumns: T_TargetEntry");
-            getUsedColumns(((TargetEntry *)expr)->expr, quasarTable);
-            break;
-        case T_Const:
-            elog(DEBUG2, "getUsedColumns: T_Const");
-            break;
-        case T_Param:
-            elog(DEBUG2, "getUsedColumns: T_Param");
-            break;
-        case T_CaseTestExpr:
-            elog(DEBUG2, "getUsedColumns: T_CaseTestExpr");
-            break;
-        case T_CoerceToDomainValue:
-            elog(DEBUG2, "getUsedColumns: T_CoerceToDomainValue");
-            break;
-        case T_CurrentOfExpr:
-            elog(DEBUG2, "getUsedColumns: T_CurrentOfExpr");
-            break;
-        case T_Var:
-            elog(DEBUG2, "getUsedColumns: T_Var");
-            variable = (Var *)expr;
-
-            /* ignore system columns */
-            if (variable->varattno < 1)
-                break;
-
-            /* get quasarTable column index corresponding to this column (-1 if none) */
-            index = quasarTable->ncols - 1;
-            while (index >= 0 && quasarTable->cols[index]->pgattnum != variable->varattno)
-                --index;
-
-            if (index == -1)
-            {
-                ereport(WARNING,
-                        (errcode(ERRCODE_WARNING),
-                        errmsg("column number %d of foreign table \"%s\" does not exist in foreign Quasar table, will be replaced by NULL", variable->varattno, quasarTable->pgname)));
-            }
-            else
-            {
-                elog(DEBUG1, "quasar_fdw: column %s is used in statement", quasarTable->cols[index]->name);
-                quasarTable->cols[index]->used = 1;
-            }
-            break;
-        case T_Aggref:
-            elog(DEBUG2, "getUsedColumns: T_Aggref");
-            foreach(cell, ((Aggref *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            foreach(cell, ((Aggref *)expr)->aggorder)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            foreach(cell, ((Aggref *)expr)->aggdistinct)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_WindowFunc:
-            elog(DEBUG2, "getUsedColumns: T_WindowFunc");
-            foreach(cell, ((WindowFunc *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_ArrayRef:
-            elog(DEBUG2, "getUsedColumns: T_ArrayRef");
-            foreach(cell, ((ArrayRef *)expr)->refupperindexpr)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            foreach(cell, ((ArrayRef *)expr)->reflowerindexpr)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            getUsedColumns(((ArrayRef *)expr)->refexpr, quasarTable);
-            getUsedColumns(((ArrayRef *)expr)->refassgnexpr, quasarTable);
-            break;
-        case T_FuncExpr:
-            elog(DEBUG2, "getUsedColumns: T_FuncExpr");
-            foreach(cell, ((FuncExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_OpExpr:
-            elog(DEBUG2, "getUsedColumns: T_OpExpr");
-            foreach(cell, ((OpExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_DistinctExpr:
-            elog(DEBUG2, "getUsedColumns: T_DistinctExpr");
-            foreach(cell, ((DistinctExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_NullIfExpr:
-            elog(DEBUG2, "getUsedColumns: T_NullIfExpr");
-            foreach(cell, ((NullIfExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_ScalarArrayOpExpr:
-            elog(DEBUG2, "getUsedColumns: T_ScalaArrayOpExpr");
-            foreach(cell, ((ScalarArrayOpExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_BoolExpr:
-            elog(DEBUG2, "getUsedColumns: T_BoolExpr");
-            foreach(cell, ((BoolExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_SubPlan:
-            elog(DEBUG2, "getUsedColumns: T_SubPlan");
-            foreach(cell, ((SubPlan *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_AlternativeSubPlan:
-            elog(DEBUG2, "getUsedColumns: T_AlternativeSubPlan");
-            /* examine only first alternative */
-            getUsedColumns((Expr *)linitial(((AlternativeSubPlan *)expr)->subplans), quasarTable);
-            break;
-        case T_NamedArgExpr:
-            elog(DEBUG2, "getUsedColumns: T_NamedArgExpr");
-            getUsedColumns(((NamedArgExpr *)expr)->arg, quasarTable);
-            break;
-        case T_FieldSelect:
-            elog(DEBUG2, "getUsedColumns: T_FieldSelect");
-            getUsedColumns(((FieldSelect *)expr)->arg, quasarTable);
-            break;
-        case T_RelabelType:
-            elog(DEBUG2, "getUsedColumns: T_RelabelType");
-            getUsedColumns(((RelabelType *)expr)->arg, quasarTable);
-            break;
-        case T_CoerceViaIO:
-            elog(DEBUG2, "getUsedColumns: T_CoerceViaIO");
-            getUsedColumns(((CoerceViaIO *)expr)->arg, quasarTable);
-            break;
-        case T_ArrayCoerceExpr:
-            elog(DEBUG2, "getUsedColumns: T_ArrayCoerceExpr");
-            getUsedColumns(((ArrayCoerceExpr *)expr)->arg, quasarTable);
-            break;
-        case T_ConvertRowtypeExpr:
-            elog(DEBUG2, "getUsedColumns: T_ConvertRowtypeExpr");
-            getUsedColumns(((ConvertRowtypeExpr *)expr)->arg, quasarTable);
-            break;
-        case T_CollateExpr:
-            elog(DEBUG2, "getUsedColumns: T_CollateExpr");
-            getUsedColumns(((CollateExpr *)expr)->arg, quasarTable);
-            break;
-        case T_CaseExpr:
-            elog(DEBUG2, "getUsedColumns: T_CaseExpr");
-            foreach(cell, ((CaseExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            getUsedColumns(((CaseExpr *)expr)->arg, quasarTable);
-            getUsedColumns(((CaseExpr *)expr)->defresult, quasarTable);
-            break;
-        case T_CaseWhen:
-            elog(DEBUG2, "getUsedColumns: T_CaseWhen");
-            getUsedColumns(((CaseWhen *)expr)->expr, quasarTable);
-            getUsedColumns(((CaseWhen *)expr)->result, quasarTable);
-            break;
-        case T_ArrayExpr:
-            elog(DEBUG2, "getUsedColumns: T_ArrayExpr");
-            foreach(cell, ((ArrayExpr *)expr)->elements)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_RowExpr:
-            elog(DEBUG2, "getUsedColumns: T_RowExpr");
-            foreach(cell, ((RowExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_RowCompareExpr:
-            elog(DEBUG2, "getUsedColumns: T_RowCompareExpr");
-            foreach(cell, ((RowCompareExpr *)expr)->largs)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            foreach(cell, ((RowCompareExpr *)expr)->rargs)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_CoalesceExpr:
-            elog(DEBUG2, "getUsedColumns: T_CoalesceExpr");
-            foreach(cell, ((CoalesceExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_MinMaxExpr:
-            elog(DEBUG2, "getUsedColumns: T_MinMaxExpr");
-            foreach(cell, ((MinMaxExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_XmlExpr:
-            elog(DEBUG2, "getUsedColumns: T_XmlExpr");
-            foreach(cell, ((XmlExpr *)expr)->named_args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            foreach(cell, ((XmlExpr *)expr)->args)
-            {
-                getUsedColumns((Expr *)lfirst(cell), quasarTable);
-            }
-            break;
-        case T_NullTest:
-            elog(DEBUG2, "getUsedColumns: T_NullTest");
-            getUsedColumns(((NullTest *)expr)->arg, quasarTable);
-            break;
-        case T_BooleanTest:
-            elog(DEBUG2, "getUsedColumns: T_BooleanTest");
-            getUsedColumns(((BooleanTest *)expr)->arg, quasarTable);
-            break;
-        case T_CoerceToDomain:
-            elog(DEBUG2, "getUsedColumns: T_CoerceToDomain");
-            getUsedColumns(((CoerceToDomain *)expr)->arg, quasarTable);
-            break;
-        default:
-            /*
-             * We must be able to handle all node types that can
-             * appear because we cannot omit a column from the remote
-             * query that will be needed.
-             * Throw an error if we encounter an unexpected node type.
-             */
-            ereport(ERROR,
-                    (errcode(ERRCODE_FDW_UNABLE_TO_CREATE_REPLY),
-                    errmsg("Internal quasar_fdw error: encountered unknown node type %d.", expr->type)));
-    }
-}
-
-
-/*
- * datumToString
- *      Convert a Datum to a string by calling the type output function.
- *      Returns the result or NULL if it cannot be converted to Quasar SQL.
- */
-static char
-*datumToString(Datum datum, Oid type)
-{
-    StringInfoData result;
-    regproc typoutput;
-    HeapTuple tuple;
-    char *str, *p;
-
-    /* get the type's output function */
-    tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
-    if (!HeapTupleIsValid(tuple))
-    {
-        elog(ERROR, "%s: cache lookup failed for type %u", __func__, type);
-    }
-    typoutput = ((Form_pg_type)GETSTRUCT(tuple))->typoutput;
-    ReleaseSysCache(tuple);
-
-    /* render the constant in Quasar SQL */
-    switch (type)
-    {
-        case TEXTOID:
-        case CHAROID:
-        case BPCHAROID:
-        case VARCHAROID:
-        case NAMEOID:
-            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
-
-            /* quote string */
-            initStringInfo(&result);
-            appendStringInfo(&result, "'");
-            for (p=str; *p; ++p)
-            {
-                if (*p == '\'')
-                    appendStringInfo(&result, "'");
-                appendStringInfo(&result, "%c", *p);
-            }
-            appendStringInfo(&result, "'");
-            break;
-        case INT8OID:
-        case INT2OID:
-        case INT4OID:
-        case OIDOID:
-        case FLOAT4OID:
-        case FLOAT8OID:
-        case NUMERICOID:
-            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
-            initStringInfo(&result);
-            appendStringInfo(&result, "%s", str);
-            break;
-        case DATEOID:
-            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
-            initStringInfo(&result);
-            appendStringInfo(&result, "DATE '%s'", str);
-            break;
-        case TIMESTAMPOID:
-            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
-            initStringInfo(&result);
-            appendStringInfo(&result, "TIMESTAMP '%s'", str);
-            break;
-        /* case TIMESTAMPTZOID: */
-        case INTERVALOID:
-            str = DatumGetCString(OidFunctionCall1(typoutput, datum));
-            initStringInfo(&result);
-            appendStringInfo(&result, "INTERVAL '%s'", str);
-            break;
-        default:
-            elog(DEBUG2, "quasar_fdw: dont know how to get cstring from %d", type);
-            return NULL;
-    }
-
-    return result.data;
-}
-
-/*
- * This macro is used by getQuasarClause to identify PostgreSQL
- * types that can be translated to Quasar SQL-2.
- */
-#define canHandleType(x) ((x) == TEXTOID || (x) == CHAROID || (x) == BPCHAROID \
-                          || (x) == VARCHAROID || (x) == NAMEOID || (x) == INT8OID || (x) == INT2OID \
-                          || (x) == INT4OID || (x) == OIDOID || (x) == FLOAT4OID || (x) == FLOAT8OID \
-                          || (x) == NUMERICOID || (x) == DATEOID || (x) == TIMEOID || (x) == TIMESTAMPOID \
-                          || (x) == INTERVALOID || (x) == BOOLOID)
-
-/* macro used by getQuasarClause
- * Recursively calls getQuasarClause on an expr
- * and checks it for NULL, returns NULL after freeing things
- */
-#define renderFree2(name, expr, free1, free2)                           \
-    name = getQuasarClause(foreignrel, (expr), quasarTable, params);    \
-    if (name == NULL) {                                                 \
-        if ((free1) != NULL) pfree((free1));                            \
-        if ((free2) != NULL) pfree((free2));                            \
-        return NULL;                                                    \
-    }
-#define render(name, expr) renderFree2(name, expr, NULL, NULL);
-#define renderFree(name, expr, free) renderFree2(name, expr, free, NULL);
-
-/*
- * getQuasarClause
- *      Create an Quasar SQL WHERE clause from the expression and store in in "where".
- *      Returns NULL if that is not possible, else a palloc'ed string.
- *      As a side effect, all Params incorporated in the WHERE clause
- *      will be stored in paramList.
- */
-char *
-getQuasarClause(RelOptInfo *foreignrel, Expr *expr, const struct QuasarTable *quasarTable, List **params)
-{
-    char *opername, *left, *right, *arg, oprkind;
-    Const *constant;
-    OpExpr *oper;
-    ScalarArrayOpExpr *arrayoper;
-    BoolExpr *boolexpr;
-    Param *param;
-    Var *variable;
-    FuncExpr *func;
-    regproc typoutput;
-    HeapTuple tuple;
-    ListCell *cell;
-    StringInfoData result;
-    Oid leftargtype, rightargtype, schema;
-    ArrayIterator iterator;
-    Datum datum;
-    bool first_arg, isNull;
-    int index;
-
-    if (expr == NULL)
-        return NULL;
-
-    switch(expr->type)
-    {
-    case T_Const:
-        elog(DEBUG2, "getQuasarClause: T_Const");
-        constant = (Const *)expr;
-        if (constant->constisnull)
-        {
-            /* only translate NULLs of a type Quasar can handle */
-            if (canHandleType(constant->consttype))
-            {
-                initStringInfo(&result);
-                appendStringInfo(&result, "NULL");
-            }
-            else
-                return NULL;
-        }
-        else
-        {
-            /* get a string representation of the value */
-            char *c = datumToString(constant->constvalue, constant->consttype);
-            if (c == NULL)
-                return NULL;
-            else
-            {
-                initStringInfo(&result);
-                appendStringInfo(&result, "%s", c);
-                pfree(c);
-            }
-        }
-        break;
-    case T_Param:
-        elog(DEBUG2, "getQuasarClause: T_Param");
-        param = (Param *)expr;
-
-        if (! canHandleType(param->paramtype))
-            return NULL;
-
-        /* find the index in the parameter list */
-        index = 0;
-        foreach(cell, *params)
-        {
-            ++index;
-            if (equal(param, (Node *)lfirst(cell)))
-                break;
-        }
-        if (cell == NULL)
-        {
-            /* add the parameter to the list */
-            ++index;
-            *params = lappend(*params, param);
-        }
-
-        /* parameters will be called :p1, :p2 etc. */
-        initStringInfo(&result);
-        appendStringInfo(&result, ":p%d", index);
-
-        break;
-
-    case T_Var:
-        elog(DEBUG2, "getQuasarClause: T_Var");
-        variable = (Var *)expr;
-
-        if (variable->varno == foreignrel->relid && variable->varlevelsup == 0)
-        {
-            /* the variable belongs to the foreign table, replace it with the name */
-
-            /* we cannot handle system columns */
-            if (variable->varattno < 1)
-                return NULL;
-
-            /*
-             * Allow boolean columns here.
-             * They will be rendered as ("COL" <> 0).
-             */
-            if (! canHandleType(variable->vartype))
-                return NULL;
-
-            /* get quasarTable column index corresponding to this column (-1 if none) */
-            index = quasarTable->ncols - 1;
-            while (index >= 0 && quasarTable->cols[index]->pgattnum != variable->varattno)
-                --index;
-
-            /* if no Quasar column corresponds, translate as NULL */
-            if (index == -1)
-            {
-                initStringInfo(&result);
-                appendStringInfo(&result, "NULL");
-                break;
-            }
-
-            /* Abandon pushdown if user told us not to pushdown this column */
-            if (quasarTable->cols[index]->nopushdown)
-                return NULL;
-
-            initStringInfo(&result);
-            appendStringInfo(&result, "%s", quasarTable->cols[index]->name);
-
-        }
-        else
-        {
-            /* treat it like a parameter */
-
-            if (! canHandleType(variable->vartype))
-                return NULL;
-
-            /* find the index in the parameter list */
-            index = 0;
-            foreach(cell, *params)
-            {
-                ++index;
-                if (equal(variable, (Node *)lfirst(cell)))
-                    break;
-            }
-            if (cell == NULL)
-            {
-                /* add the parameter to the list */
-                ++index;
-                *params = lappend(*params, variable);
-            }
-
-            /* parameters will be called :p1, :p2 etc. */
-            initStringInfo(&result);
-            appendStringInfo(&result, ":p%d", index);
-        }
-
-        break;
-    case T_OpExpr:
-        elog(DEBUG2, "getQuasarClause: T_OpExpr");
-        oper = (OpExpr *)expr;
-
-        /* get operator name, kind, argument type and schema */
-        tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(oper->opno));
-        if (! HeapTupleIsValid(tuple))
-        {
-            elog(ERROR, "cache lookup failed for operator %u", oper->opno);
-        }
-        opername = pstrdup(((Form_pg_operator)GETSTRUCT(tuple))->oprname.data);
-        oprkind = ((Form_pg_operator)GETSTRUCT(tuple))->oprkind;
-        leftargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprleft;
-        rightargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprright;
-        schema = ((Form_pg_operator)GETSTRUCT(tuple))->oprnamespace;
-        ReleaseSysCache(tuple);
-
-        /* ignore operators in other than the pg_catalog schema */
-        if (schema != PG_CATALOG_NAMESPACE)
-            return NULL;
-
-        if (! canHandleType(rightargtype))
-            return NULL;
-
-        /* OPERATORS */
-        /* the operators that we can translate */
-        if (strcmp(opername, "=") == 0
-            || strcmp(opername, "<>") == 0
-            || strcmp(opername, ">") == 0
-            || strcmp(opername, "<") == 0
-            || strcmp(opername, ">=") == 0
-            || strcmp(opername, "<=") == 0
-            || strcmp(opername, "+") == 0
-            || strcmp(opername, "/") == 0
-            /* Cannot subtract DATEs in Quasar */
-            || (strcmp(opername, "-") == 0 && rightargtype != DATEOID
-                && rightargtype != TIMESTAMPOID
-                && rightargtype != TIMESTAMPTZOID)
-            || strcmp(opername, "*") == 0
-            /* Regexes in Quasar only take constant right sides */
-            || (strcmp(opername, "~~") == 0 && ((Expr*)lsecond(oper->args))->type == T_Const)
-            || (strcmp(opername, "!~~") == 0 && ((Expr*)lsecond(oper->args))->type == T_Const)
-            /* || strcmp(opername, "~~*") == 0 */ /* Case Insensitive LIKE */
-            /* || strcmp(opername, "!~~*") == 0 */ /* Not Case Insensitive LIKE */
-            /* || strcmp(opername, "^") == 0 */ /* Power */
-            || strcmp(opername, "%") == 0
-            /* || strcmp(opername, "&") == 0 */ /* Bit-and */
-            /* || strcmp(opername, "|/") == 0 */ /* Square Root */
-            /* || strcmp(opername, "@") == 0 */ /* Absolute Value */
-            )
-        {
-            renderFree(left, linitial(oper->args), opername);
-
-            if (oprkind == 'b')
-            {
-                /* TRANSFORM BINARY OPERATOR */
-                renderFree2(right, lsecond(oper->args), left, opername);
-
-                initStringInfo(&result);
-                if (strcmp(opername, "~~") == 0)
-                {
-                    /* TODO Add ESCAPE args to LIKE? */
-                    appendStringInfo(&result, "(%s LIKE %s)", left, right);
-                }
-                else if (strcmp(opername, "!~~") == 0)
-                {
-                    appendStringInfo(&result, "(%s NOT LIKE %s)", left, right);
-                }
-                else
-                {
-                    /* the other operators have the same name in Quasar */
-                    appendStringInfo(&result, "(%s %s %s)", left, opername, right);
-                }
-                pfree(right);
-                pfree(left);
-            }
-            else
-            {
-                /* TRANSFORM UNARY OPERATOR */
-                /* unary operator */
-                initStringInfo(&result);
-                /* unary + or - */
-                appendStringInfo(&result, "(%s%s)", opername, left);
-
-                pfree(left);
-            }
-        }
-        else
-        {
-            /* cannot translate this operator */
-            pfree(opername);
-            return NULL;
-        }
-
-        pfree(opername);
-        break;
-    case T_ScalarArrayOpExpr:
-        elog(DEBUG2, "getQuasarClause: T_ScalarArrayOpExpr");
-        arrayoper = (ScalarArrayOpExpr *)expr;
-
-        /* get operator name, left argument type and schema */
-        tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(arrayoper->opno));
-        if (! HeapTupleIsValid(tuple))
-        {
-            elog(ERROR, "cache lookup failed for operator %u", arrayoper->opno);
-        }
-        opername = pstrdup(((Form_pg_operator)GETSTRUCT(tuple))->oprname.data);
-        leftargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprleft;
-        schema = ((Form_pg_operator)GETSTRUCT(tuple))->oprnamespace;
-        ReleaseSysCache(tuple);
-
-        /* get the type's output function */
-        tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(leftargtype));
-        if (!HeapTupleIsValid(tuple))
-        {
-            elog(ERROR, "%s cache lookup failed for type %u", __func__, leftargtype);
-        }
-        typoutput = ((Form_pg_type)GETSTRUCT(tuple))->typoutput;
-        ReleaseSysCache(tuple);
-
-        /* ignore operators in other than the pg_catalog schema */
-        if (schema != PG_CATALOG_NAMESPACE)
-            return NULL;
-
-        /* don't try to push down anything but IN and NOT IN expressions */
-        if ((strcmp(opername, "=") != 0 || ! arrayoper->useOr)
-            && (strcmp(opername, "<>") != 0 || arrayoper->useOr))
-            return NULL;
-
-        if (! canHandleType(leftargtype))
-            return NULL;
-
-        render(left, linitial(arrayoper->args));
-
-        /* only push down IN expressions with constant second (=last) argument */
-        if (((Expr *)llast(arrayoper->args))->type != T_Const)
-            return NULL;
-
-        /* begin to compose result */
-        initStringInfo(&result);
-        appendStringInfo(&result, "(%s %s [", left, arrayoper->useOr ? "IN" : "NOT IN");
-
-        /* the second (=last) argument must be a Const of ArrayType */
-        constant = (Const *)llast(arrayoper->args);
-
-        /* using NULL in place of an array or value list is valid in Quasar and PostgreSQL */
-        if (constant->constisnull)
-            appendStringInfo(&result, "NULL");
-        else
-        {
-            /* loop through the array elements */
-            iterator = array_create_iterator(DatumGetArrayTypeP(constant->constvalue), 0);
-            first_arg = true;
-            while (array_iterate(iterator, &datum, &isNull))
-            {
-                char *c;
-
-                if (isNull)
-                    c = "NULL";
-                else
-                {
-                    c = datumToString(datum, leftargtype);
-                    if (c == NULL)
-                    {
-                        array_free_iterator(iterator);
-                        return NULL;
-                    }
-                }
-
-                /* append the argument */
-                appendStringInfo(&result, "%s%s", first_arg ? "" : ", ", c);
-                first_arg = false;
-            }
-            array_free_iterator(iterator);
-
-            /* don't push down empty arrays, since the semantics for NOT x = ANY(<empty array>) differ */
-            if (first_arg)
-                return NULL;
-        }
-
-        /* two parentheses close the expression */
-        appendStringInfo(&result, "])");
-
-        break;
-    case T_DistinctExpr:        /* (x IS DISTINCT FROM y) */
-        elog(DEBUG2, "getQuasarClause: T_DistinctExpr");
-        return NULL;
-        break;
-    case T_NullIfExpr:          /* NULLIF(x, y) */
-        elog(DEBUG2, "getQuasarClause: T_NullIfExpr");
-        return NULL;
-        break;
-    case T_BoolExpr:
-        elog(DEBUG2, "getQuasarClause: T_BoolExpr");
-        boolexpr = (BoolExpr *)expr;
-
-        arg = getQuasarClause(foreignrel, linitial(boolexpr->args), quasarTable, params);
-        if (arg == NULL)
-            return NULL;
-
-        initStringInfo(&result);
-        appendStringInfo(&result, "(%s%s",
-                         boolexpr->boolop == NOT_EXPR ? "NOT " : "",
-                         arg);
-
-        for_each_cell(cell, lnext(list_head(boolexpr->args)))
-        {
-            renderFree(arg, (Expr*) lfirst(cell), result.data);
-
-            appendStringInfo(&result, " %s %s",
-                             boolexpr->boolop == AND_EXPR ? "AND" : "OR",
-                             arg);
-        }
-        appendStringInfo(&result, ")");
-
-        break;
-    case T_RelabelType:
-        elog(DEBUG2, "getQuasarClause: T_RelabelType");
-        return getQuasarClause(foreignrel, ((RelabelType *)expr)->arg, quasarTable, params);
-        break;
-    case T_CoerceToDomain:
-        elog(DEBUG2, "getQuasarClause: T_CoerceToDomain");
-        return getQuasarClause(foreignrel, ((CoerceToDomain *)expr)->arg, quasarTable, params);
-        break;
-    case T_CaseExpr:
-        elog(DEBUG2, "getQuasarClause: T_CaseExpr");
-        return NULL;
-        break;
-    case T_CoalesceExpr:
-        elog(DEBUG2, "getQuasarClause: T_CoalesceExpr");
-        return NULL;
-        break;
-    case T_NullTest:
-        elog(DEBUG2, "getQuasarClause: T_NullTest");
-        render(arg, ((NullTest *)expr)->arg);
-
-        initStringInfo(&result);
-        appendStringInfo(&result, "(%s IS %sNULL)",
-                         arg,
-                         ((NullTest *)expr)->nulltesttype == IS_NOT_NULL ? "NOT " : "");
-        break;
-    case T_FuncExpr:
-        elog(DEBUG2, "getQuasarClause: T_FuncExpr");
-        func = (FuncExpr *)expr;
-
-        if (! canHandleType(func->funcresulttype))
-            return NULL;
-
-        /* do nothing for implicit casts */
-        if (func->funcformat == COERCE_IMPLICIT_CAST)
-            return getQuasarClause(foreignrel, linitial(func->args), quasarTable, params);
-
-        /* get function name and schema */
-        tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func->funcid));
-        if (! HeapTupleIsValid(tuple))
-        {
-            elog(ERROR, "cache lookup failed for function %u", func->funcid);
-        }
-        opername = pstrdup(((Form_pg_proc)GETSTRUCT(tuple))->proname.data);
-        schema = ((Form_pg_proc)GETSTRUCT(tuple))->pronamespace;
-        ReleaseSysCache(tuple);
-
-        /* ignore functions in other than the pg_catalog schema */
-        if (schema != PG_CATALOG_NAMESPACE)
-            return NULL;
-
-        /* FUNCTIONS */
-        /* the "normal" functions that we can translate */
-        if (strcmp(opername, "char_length") == 0
-            || strcmp(opername, "character_length") == 0
-            || strcmp(opername, "concat") == 0
-            || strcmp(opername, "length") == 0
-            || strcmp(opername, "lower") == 0
-            || (strcmp(opername, "substr") == 0 && list_length(func->args) == 3)
-            || (strcmp(opername, "substring") == 0 && list_length(func->args) == 3)
-            || strcmp(opername, "upper") == 0
-            || strcmp(opername, "date_part") == 0
-            || strcmp(opername, "to_timestamp") == 0)
-        {
-            initStringInfo(&result);
-
-            /* FUNCTION TRANSFORMS */
-            if (strcmp(opername, "char_length") == 0 ||
-                strcmp(opername, "character_length") == 0)
-                appendStringInfo(&result, "length(");
-            else if (strcmp(opername, "substr") == 0)
-                appendStringInfo(&result, "substring(");
-            else
-                appendStringInfo(&result, "%s(", opername);
-
-            first_arg = true;
-            foreach(cell, func->args)
-            {
-                renderFree2(arg, lfirst(cell), result.data, opername);
-
-                if (!first_arg) appendStringInfoChar(&result, ',');
-                appendStringInfo(&result, "%s", arg);
-                first_arg = false;
-
-                pfree(arg);
-            }
-
-            appendStringInfoChar(&result, ')');
-        }
-        else
-        {
-            /* function that we cannot render for Quasar */
-            pfree(opername);
-            return NULL;
-        }
-
-        pfree(opername);
-        break;
-    case T_CoerceViaIO:
-        /*
-         * Quasar doesn't support CAST
-         */
-        elog(DEBUG2, "getQuasarClause: T_CoerceViaIO");
-        return NULL;
-        break;
-    default:
-        /* we cannot translate this to Quasar */
-        elog(DEBUG2, "getQuasarClause: Other: %d", expr->type);
-        return NULL;
-    }
-
-    return result.data;
-}
-
-/*
- * Find an equivalence class member expression, all of whose Vars, come from
- * the indicated relation.
- */
-Expr *find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel)
-{
-    ListCell   *lc_em;
-
-    foreach(lc_em, ec->ec_members)
-    {
-        EquivalenceMember *em = lfirst(lc_em);
-
-        if (bms_equal(em->em_relids, rel->relids))
-        {
-            /*
-             * If there is more than one equivalence member whose Vars are
-             * taken entirely from this relation, we'll be content to choose
-             * any one of those.
-             */
-            return em->em_expr;
-        }
-    }
-
-    /* We didn't find any suitable equivalence class expression */
-    return NULL;
 }
 
 /*
@@ -2137,4 +1112,238 @@ ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
     /* This is the new target to process. */
     state->current = expr;
     return true;
+}
+
+
+/*
+ * Find an equivalence class member expression, all of whose Vars, come from
+ * the indicated relation.
+ */
+extern Expr *
+find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel)
+{
+    ListCell   *lc_em;
+
+    foreach(lc_em, ec->ec_members)
+    {
+        EquivalenceMember *em = lfirst(lc_em);
+
+        if (bms_equal(em->em_relids, rel->relids))
+        {
+            /*
+             * If there is more than one equivalence member whose Vars are
+             * taken entirely from this relation, we'll be content to choose
+             * any one of those.
+             */
+            return em->em_expr;
+        }
+    }
+
+    /* We didn't find any suitable equivalence class expression */
+    return NULL;
+}
+
+
+/*
+ * estimate_path_cost_size
+ *              Get cost and size estimates for a foreign scan
+ *
+ * We assume that all the baserestrictinfo clauses will be applied, plus
+ * any join clauses listed in join_conds.
+ */
+static void
+estimate_path_cost_size(PlannerInfo *root,
+                        RelOptInfo *baserel,
+                        List *join_conds,
+                        List *pathkeys,
+                        double *p_rows, int *p_width,
+                        Cost *p_startup_cost, Cost *p_total_cost)
+{
+    QuasarFdwRelationInfo *fpinfo = (QuasarFdwRelationInfo *) baserel->fdw_private;
+    double              rows;
+    double              retrieved_rows;
+    int                 width;
+    Cost                startup_cost;
+    Cost                total_cost;
+    Cost                run_cost;
+    Cost                cpu_per_tuple;
+
+    /*
+     * If the table or the server is configured to use remote estimates,
+     * connect to the foreign server and execute a COUNT to estimate the
+     * number of rows selected by the restriction+join clauses.  Otherwise,
+     * estimate rows using whatever statistics we have locally, in a way
+     * similar to ordinary tables.
+     */
+    if (fpinfo->use_remote_estimate)
+    {
+        List       *remote_join_conds;
+        List       *local_join_conds;
+        StringInfoData sql;
+        List       *retrieved_attrs;
+        Selectivity local_sel;
+        QualCost        local_cost;
+        QuasarConn *conn;
+
+        /*
+         * join_conds might contain both clauses that are safe to send across,
+         * and clauses that aren't.
+         */
+        classifyConditions(root, baserel, join_conds,
+                           &remote_join_conds, &local_join_conds);
+
+        /*
+         * Construct a SELECT count(*) with only the WHERE clauses.
+         * Since quasar doesn't have an EXPLAIN API, we can't include things
+         * that don't impact the row count like join or ordering
+         **/
+        initStringInfo(&sql);
+        deparseSelectSql(&sql, root, baserel, fpinfo->attrs_used,
+                         &retrieved_attrs, true);
+        if (fpinfo->remote_conds)
+            appendWhereClause(&sql, root, baserel, fpinfo->remote_conds,
+                              true, NULL);
+        /* if (remote_join_conds) */
+        /*     appendWhereClause(&sql, root, baserel, remote_join_conds, */
+        /*                       (fpinfo->remote_conds == NIL), NULL); */
+
+        /* if (pathkeys) */
+        /*     appendOrderByClause(&sql, root, baserel, pathkeys); */
+
+        /* Get the remote estimate */
+        conn = QuasarGetConnection(fpinfo->server);
+        rows = QuasarEstimateRows(conn, sql.data);
+        QuasarCleanupConnection(conn);
+
+        /* Ideally quasar gives these to us but we have to improvise */
+        width = baserel->width;
+        startup_cost = QUASAR_STARTUP_COST;
+        total_cost = startup_cost + rows * QUASAR_PER_TUPLE_COST;
+
+        retrieved_rows = rows;
+
+        /* Estimate less rows with a join condition */
+        if (remote_join_conds)
+            rows *= FDW_JOIN_MULTIPLIER;
+
+        /* Factor in the selectivity of the locally-checked quals */
+        local_sel = clauselist_selectivity(root,
+                                           local_join_conds,
+                                           baserel->relid,
+                                           JOIN_INNER,
+                                           NULL);
+        local_sel *= fpinfo->local_conds_sel;
+
+        rows = clamp_row_est(rows * local_sel);
+
+        /* Add in the eval cost of the locally-checked quals */
+        startup_cost += fpinfo->local_conds_cost.startup;
+        total_cost += fpinfo->local_conds_cost.per_tuple * retrieved_rows;
+        cost_qual_eval(&local_cost, local_join_conds, root);
+        startup_cost += local_cost.startup;
+        total_cost += local_cost.per_tuple * retrieved_rows;
+    } else {
+
+        /* Use rows/width estimates made by set_baserel_size_estimates. */
+        rows = baserel->rows;
+        width = baserel->width;
+
+        /*
+         * Back into an estimate of the number of retrieved rows.  Just in
+         * case this is nuts, clamp to at most baserel->tuples.
+         */
+        retrieved_rows = clamp_row_est(rows / fpinfo->local_conds_sel);
+        retrieved_rows = Min(retrieved_rows, baserel->tuples);
+
+        /*
+         * Cost as though this were a seqscan, which is pessimistic.  We
+         * effectively imagine the local_conds are being evaluated remotely,
+         * too.
+         */
+        startup_cost = 0;
+        run_cost = 0;
+        run_cost += seq_page_cost * baserel->pages;
+
+        startup_cost += baserel->baserestrictcost.startup;
+        cpu_per_tuple = cpu_tuple_cost + baserel->baserestrictcost.per_tuple;
+        run_cost += cpu_per_tuple * baserel->tuples;
+
+        /*
+         * Without remote estimates, we have no real way to estimate the cost
+         * of generating sorted output.  It could be free if the query plan
+         * the remote side would have chosen generates properly-sorted output
+         * anyway, but in most cases it will cost something.  Estimate a value
+         * high enough that we won't pick the sorted path when the ordering
+         * isn't locally useful, but low enough that we'll err on the side of
+         * pushing down the ORDER BY clause when it's useful to do so.
+         */
+        if (pathkeys != NIL)
+        {
+            startup_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
+            run_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
+        }
+
+        total_cost = startup_cost + run_cost;
+    }
+
+    /*
+     * Add some additional cost factors to account for connection overhead
+     * (fdw_startup_cost), transferring data across the network
+     * (fdw_tuple_cost per retrieved row), and local manipulation of the data
+     * (cpu_tuple_cost per retrieved row).
+     */
+    startup_cost += fpinfo->fdw_startup_cost;
+    total_cost += fpinfo->fdw_startup_cost;
+    total_cost += fpinfo->fdw_tuple_cost * retrieved_rows;
+    total_cost += cpu_tuple_cost * retrieved_rows;
+
+    /* Return results. */
+    *p_rows = rows;
+    *p_width = width;
+    *p_startup_cost = startup_cost;
+    *p_total_cost = total_cost;
+}
+
+/* Render parameters in foreign scan state */
+static void
+renderParams(QuasarFdwScanState *fsstate, ExprContext *econtext)
+{
+    /*
+     * Construct array of query parameter values in text format.  We do the
+     * conversions in the short-lived per-tuple context, so as not to cause a
+     * memory leak over repeated scans.
+     */
+    if (fsstate->numParams > 0)
+    {
+        MemoryContext oldcontext;
+        int           i;
+        ListCell     *lc;
+
+        oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+
+        i = 0;
+        foreach(lc, fsstate->param_exprs)
+        {
+            ExprState  *expr_state = (ExprState *) lfirst(lc);
+            Datum       expr_value;
+            bool        isNull;
+
+            /* Evaluate the parameter expression */
+            expr_value = ExecEvalExpr(expr_state, econtext, &isNull, NULL);
+
+            /*
+             * Get string representation of each parameter value by invoking
+             * type-specific output function, unless the value is null.
+             */
+            if (isNull)
+                fsstate->param_values[i] = NULL;
+            else
+                fsstate->param_values[i] =
+                    OutputFunctionCall(&fsstate->param_flinfo[i],
+                                       expr_value);
+            i++;
+        }
+
+        MemoryContextSwitchTo(oldcontext);
+    }
 }

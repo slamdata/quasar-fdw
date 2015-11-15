@@ -69,8 +69,12 @@ static struct QuasarFdwOption valid_options[] =
     { "server",  ForeignServerRelationId },
     { "path",    ForeignServerRelationId },
     { "timeout_ms", ForeignServerRelationId },
-    /* Available options for CREATE FOREIGN TABLE */
+    { "use_remote_estimate", ForeignServerRelationId },
+    { "fdw_startup_cost", ForeignServerRelationId },
+    { "fdw_tuple_cost", ForeignServerRelationId },
+        /* Available options for CREATE FOREIGN TABLE */
     { "table",   ForeignTableRelationId },
+    { "use_remote_estimate", ForeignTableRelationId },
     /* Available options for columns inside CREATE FOREIGN TABLE */
     { "map",     AttributeRelationId },
     { "nopushdown", AttributeRelationId },
@@ -147,68 +151,4 @@ quasar_is_valid_option(const char *option, Oid context)
             return true;
     }
     return false;
-}
-
-/*
- * Fetch the options for a quasar_fdw foreign table.
- */
-QuasarOpt* quasar_get_options(Oid foreignoid) {
-    ForeignTable *f_table = NULL;
-    ForeignServer *f_server = NULL;
-    /* UserMapping *f_mapping; */
-    List *options;
-    ListCell *lc;
-    QuasarOpt *opt;
-
-    opt = (QuasarOpt*) palloc(sizeof(QuasarOpt));
-    memset(opt, 0, sizeof(QuasarOpt));
-
-    /*
-     * Extract options from FDW objects.
-     */
-    PG_TRY();
-    {
-        f_table = GetForeignTable(foreignoid);
-        f_server = GetForeignServer(f_table->serverid);
-    }
-    PG_CATCH();
-    {
-        f_table = NULL;
-        f_server = GetForeignServer(foreignoid);
-    }
-    PG_END_TRY();
-
-    /* f_mapping = GetUserMapping(GetUserId(), f_server->serverid); */
-
-    options = NIL;
-    if (f_table)
-        options = list_concat(options, f_table->options);
-    options = list_concat(options, f_server->options);
-    /* options = list_concat(options, f_mapping->options); */
-
-    /* Defaults */
-    opt->server = DEFAULT_SERVER;
-    opt->path = DEFAULT_PATH;
-    opt->timeout_ms = DEFAULT_CURL_TIMEOUT_MS;
-
-    /* Loop through the options, and get the server/port */
-    foreach(lc, options)
-    {
-        DefElem *def = (DefElem *) lfirst(lc);
-
-        if (strcmp(def->defname, "server") == 0)
-            opt->server = defGetString(def);
-        else if (strcmp(def->defname, "path") == 0)
-            opt->path = defGetString(def);
-        else if (strcmp(def->defname, "timeout_ms") == 0)
-            opt->timeout_ms = atol(defGetString(def));
-        else if (strcmp(def->defname, "table") == 0)
-            opt->table = defGetString(def);
-    }
-
-    if (opt->timeout_ms <= 0) {
-        elog(ERROR, "Option timeout_ms requires a positive value");
-    }
-
-    return opt;
 }
