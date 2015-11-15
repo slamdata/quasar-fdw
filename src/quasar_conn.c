@@ -132,10 +132,14 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
                    const char **param_values, size_t numParams)
 {
     int sc, i;
-    CURL *curl = conn->curl;
+    CURL *curl = curl_easy_init();
     CURLM *curlm = conn->curlm;
     StringInfoData url;
     StringInfoData param;
+    StringInfoData dest;
+    quasar_info_curl_context infoctx;
+    struct curl_slist *headers = NULL;
+    char *destination;
 
     Assert(conn->curlm != NULL && conn->qctx != NULL);
 
@@ -144,16 +148,51 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
     initStringInfo(&param);
     appendStringInfo(&url, "%s/query/fs%s", conn->server, conn->path);
 
-    appendStringInfoQuery(curl, &url, "q", query, true);
-
     for (i = 0; i < numParams; ++i) {
         resetStringInfo(&param);
-        appendStringInfo(&param, "p%d", i);
-        appendStringInfoQuery(curl, &url, param.data, param_values[i], false);
+        appendStringInfo(&param, "p%d", i+1);
+        appendStringInfoQuery(curl, &url, param.data, param_values[i], i == 0);
     }
-    conn->full_url = url.data;
+
+    initStringInfo(&dest);
+    appendStringInfo(&dest, "%s/fdw_%d", conn->path, rand());
+    destination = pstrdup(dest.data);
+    resetStringInfo(&dest);
+    appendStringInfo(&dest, "Destination: %s", destination);
+    headers = curl_slist_append(headers, dest.data);
 
     /* Set up CURL instance. */
+    curl_easy_setopt(curl, CURLOPT_URL, url.data);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, query);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &infoctx);
+
+    elog(DEBUG1, "curling %s with query %s", url.data, query);
+    sc = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (sc != CURLE_OK)
+    {
+        QuasarCleanupConnection(conn);
+        elog(ERROR, "quasar_fdw: curl %s failed: %s", url.data, curl_easy_strerror(sc));
+    }
+
+    if (infoctx.status != 200)
+    {
+        QuasarCleanupConnection(conn);
+        elog(ERROR, "quasar_fdw: Got bad response from quasar: %d (%s)", infoctx.status, url.data);
+    }
+
+    /* Ok now we go get the data */
+    curl = conn->curl;
+
+    resetStringInfo(&url);
+    appendStringInfo(&url, "%s/data/fs%s", conn->server, destination);
+    conn->full_url = url.data;
+
     curl_easy_setopt(curl, CURLOPT_URL, url.data);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
@@ -161,12 +200,11 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, query_body_handler);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, conn->qctx);
 
-    elog(DEBUG1, "curling %s", url.data);
     sc = curl_multi_add_handle(curlm, curl);
-    if (sc != 0) {
-        /* Cleanup before exception */
+    if (sc != CURLM_OK)
+    {
         QuasarCleanupConnection(conn);
-        elog(ERROR, "curl %s failed: %d", url.data, sc);
+        elog(ERROR, "quasar_fdw: curl add handle failed %s", curl_multi_strerror(sc));
     }
 
     conn->ongoing_transfers = 1;
@@ -272,6 +310,10 @@ QuasarEstimateRows(QuasarConn *conn, char *query)
 
     response = execute_info_curl(conn, url.data);
 
+    /* Quasar returns no rows if nothing matched */
+    if (strlen(response) == 0)
+        return 0.0;
+
     n = sscanf(response, "{ \"0\": %ld }", &rows);
 
     if (n != 1)
@@ -297,10 +339,11 @@ execute_info_curl(QuasarConn *conn, char *url)
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, ctx);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, info_body_handler);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, ctx);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 
+    elog(DEBUG1, "quasar_fdw: Curling for information %s", url);
     cc = curl_easy_perform(curl);
     if (cc != CURLE_OK)
     {

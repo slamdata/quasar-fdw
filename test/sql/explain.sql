@@ -45,3 +45,5 @@ EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY length(city), pop DESC, state;
 EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY state NULLS FIRST;
 /* If one ORDER BY column can't be pushed down, none are */
 EXPLAIN (COSTS off) SELECT * FROM commits ORDER BY ts, sha;
+/* VERBOSE on */
+EXPLAIN (VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY pop DESC;

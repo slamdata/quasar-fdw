@@ -9,6 +9,12 @@ The main advantage of using this FDW over alternatives is that it takes full adv
 
 11/14/2015:
 - I have completed the rewrite of the entire codebase to get to past functionality. With a bit more testing and improvement, we can get parameterized JOIN pushdown, query size estimation (required for JOIN pushdown), and EXPLAIN (VERBOSE on). ANALYZE is also in sight as an optional task.
+- EXPLAIN (VERBOSE on) now adds the mongo query to the output.
+- Join pushdown now works. It only works when `use_remote_estimate` is `true` for a SERVER or a TABLE. For join scans it will optimize to a Hash join. For small numbers of records, it will optimize to a nested loop of parameterized paths.
+- Next Steps:
+    - Add a bunch of tests for different joins
+    - Create packaging script
+    - test on various platforms
 
 11/13/2015:
 - Even though [SQL/MED](https://wiki.postgresql.org/wiki/SQL/MED) claims ORDER BY clauses can't be pushed down, they can! I just got that to work.
@@ -111,6 +117,12 @@ CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
        OPTIONS (table 'nested');
 
 SELECT city FROM zips LIMIT 3;
+
+-- See the Quasar Query used
+EXPLAIN SELECT city FROM zips;
+
+-- See the Quasar and Mongo queries used
+EXPLAIN (VERBOSE on) SELECT city FROM zips;
 ```
 
 ### Gotchyas

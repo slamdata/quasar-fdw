@@ -37,7 +37,7 @@
 #define DEFAULT_FDW_TUPLE_COST 0.01
 /* Multiplier on cost to sort (~= n * log n) */
 #define DEFAULT_FDW_SORT_MULTIPLIER 1.2 /* 20% */
-#define FDW_JOIN_MULTIPLIER 0.05        /* 5% */
+#define FDW_JOIN_MULTIPLIER 0.01        /* 1% */
 #define QUASAR_STARTUP_COST 10.0
 #define QUASAR_PER_TUPLE_COST 0.001
 

@@ -56,3 +56,9 @@ CREATE FOREIGN TABLE user_comments
        ,comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
        ,comment_time date OPTIONS (map 'comments[*]."time"'))
        SERVER quasar OPTIONS (table 'user_comments');
+CREATE FOREIGN TABLE zips_re(city varchar, pop integer, state char(2))
+       SERVER quasar OPTIONS (table 'zips'
+                             ,use_remote_estimate 'true');
+CREATE FOREIGN TABLE smallzips_re(city varchar, pop integer, state char(2))
+       SERVER quasar OPTIONS (table 'smallZips'
+                             ,use_remote_estimate 'true');

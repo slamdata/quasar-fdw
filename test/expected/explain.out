@@ -192,3 +192,24 @@ EXPLAIN (COSTS off) SELECT * FROM commits ORDER BY ts, sha;
          Quasar query: SELECT "commit"."author"."date" AS "ts", "sha", "commit"."author"."name" AS "author_name", "commit"."author"."email" AS "author_email", "url", "commit"."comment_count" AS "comment_count" FROM "slamengine_commits"
 (4 rows)
 
+/* VERBOSE on */
+EXPLAIN (VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY pop DESC;
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Sort  (cost=125.42..125.43 rows=6 width=48)
+   Output: city, pop, state
+   Sort Key: zips.pop
+   ->  Foreign Scan on public.zips  (cost=101.00..125.34 rows=6 width=48)
+         Output: city, pop, state
+         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("state" = 'CO'))
+         Compiled Mongo Query: Mongo
+ db.zips.aggregate(
+   [
+     { "$match": { "state": "CO" } },
+     { "$project": { "city": "$city", "pop": "$pop", "state": "$state" } },
+     { "$out": "tmp.gen_0" }],
+   { "allowDiskUse": true });
+ db.tmp.gen_0.find();
+ 
+(15 rows)
+

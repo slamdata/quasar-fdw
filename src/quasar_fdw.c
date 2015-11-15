@@ -472,6 +472,9 @@ quasarGetForeignPaths(PlannerInfo *root,
      * actually be an indexscan happening there).  We already did all the work
      * to estimate cost and size of this path.
      */
+    elog(DEBUG1, "Creating basic foreignscan path with total cost %f rows %f startup_cost %f",
+         fpinfo->total_cost, fpinfo->rows, fpinfo->startup_cost);
+
     path = create_foreignscan_path(root, baserel,
                                    fpinfo->rows,
                                    fpinfo->startup_cost,
@@ -531,6 +534,8 @@ quasarGetForeignPaths(PlannerInfo *root,
                                        &rows, &width,
                                        &startup_cost,
                                        &total_cost);
+
+        elog(DEBUG1, "Creating foreignscan path with %d pathkeys and total cost %f rows %f startup_cost %f", list_length(usable_pathkeys), total_cost, rows, startup_cost);
 
         add_path(baserel, (Path *)
                  create_foreignscan_path(root, baserel,
@@ -700,6 +705,8 @@ quasarGetForeignPaths(PlannerInfo *root,
          */
         param_info->ppi_rows = rows;
 
+        elog(DEBUG1, "Creating foreignscan_path with %d outer relations, total_cost %f rows %f startup_cost %f", bms_num_members(param_info->ppi_req_outer), total_cost, rows, startup_cost);
+
         /* Make the path */
         path = create_foreignscan_path(root, baserel,
                                        rows,
@@ -814,6 +821,9 @@ quasarGetForeignPlan(PlannerInfo *root,
     fdw_private = list_make2(makeString(sql.data),
                              retrieved_attrs);
 
+    elog(DEBUG1, "Making foreignscan with %d remote_conds and %d local_conds",
+         list_length(remote_conds), list_length(local_exprs));
+
     /*
      * Create the ForeignScan node from target list, local filtering
      * expressions, remote parameter expressions, and FDW private information.
@@ -823,7 +833,6 @@ quasarGetForeignPlan(PlannerInfo *root,
      * because then they wouldn't be subject to later planner processing.
      */
 #if(PG_VERSION_NUM < 90500)
-    elog(DEBUG1, "make_foreignscan %d", baserel->relid);
     return make_foreignscan(tlist,
                             local_exprs,
                             scan_relid,
@@ -1172,13 +1181,13 @@ estimate_path_cost_size(PlannerInfo *root,
      * If the table or the server is configured to use remote estimates,
      * connect to the foreign server and execute a COUNT to estimate the
      * number of rows selected by the restriction+join clauses.  Otherwise,
-     * estimate rows using whatever statistics we have locally, in a way
-     * similar to ordinary tables.
+     * estimate rows using whatever statistics we have		, in a way
+     * similar 		ary tables.
      */
     if (fpinfo->use_remote_estimate)
     {
-        List       *remote_join_conds;
-        List       *local_join_conds;
+        List *remote_join_conds;
+        List *local_join_conds;
         StringInfoData sql;
         List       *retrieved_attrs;
         Selectivity local_sel;
@@ -1217,14 +1226,21 @@ estimate_path_cost_size(PlannerInfo *root,
 
         /* Ideally quasar gives these to us but we have to improvise */
         width = baserel->width;
+
         startup_cost = QUASAR_STARTUP_COST;
-        total_cost = startup_cost + rows * QUASAR_PER_TUPLE_COST;
+        cpu_per_tuple = QUASAR_PER_TUPLE_COST;
+        if (pathkeys)
+            cpu_per_tuple *= DEFAULT_FDW_SORT_MULTIPLIER;
+        total_cost = startup_cost + rows * cpu_per_tuple;
 
         retrieved_rows = rows;
 
         /* Estimate less rows with a join condition */
         if (remote_join_conds)
-            rows *= FDW_JOIN_MULTIPLIER;
+            total_cost *= FDW_JOIN_MULTIPLIER;
+
+        elog(DEBUG1, "Estimating path cost with remote_enabled: %s %f %f",
+             sql.data, rows, total_cost);
 
         /* Factor in the selectivity of the locally-checked quals */
         local_sel = clauselist_selectivity(root,
