@@ -399,6 +399,7 @@ void quasar_parse_alloc(quasar_parse_context *ctx, AttInMetadata *attinmeta) {
     p->attinmeta = attinmeta;
     p->values = palloc(attinmeta->tupdesc->natts * sizeof(Datum));
     p->nulls = palloc(attinmeta->tupdesc->natts * sizeof(bool));
+    p->wanred = 0;
     initStringInfo(&p->json);
     initStringInfo(&p->array);
     ctx->p = p;
@@ -425,6 +426,7 @@ void quasar_parse_reset(quasar_parse_context *ctx) {
     p->cur_col = NO_COLUMN;
     p->level = TOP_LEVEL;
     p->record_complete = false;
+    p->warned = false;
     resetStringInfo(&p->json);
     resetStringInfo(&p->array);
     yajl_reset(ctx->handle);
