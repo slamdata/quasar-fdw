@@ -183,6 +183,7 @@ extern void appendWhereClause(StringInfo buf,
                               List *exprs,
                               bool is_first,
                               List **params);
+extern void deparseLiteral(StringInfo buf, Oid type, const char *svalue);
 extern void deparseStringLiteral(StringInfo buf, const char *val);
 extern Expr *find_em_expr_for_rel(EquivalenceClass *ec, RelOptInfo *rel);
 extern void appendOrderByClause(StringInfo buf, PlannerInfo *root,

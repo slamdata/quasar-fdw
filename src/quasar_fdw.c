@@ -119,35 +119,14 @@ typedef struct QuasarFdwScanState
     List           *retrieved_attrs;    /* list of retrieved attribute numbers */
 
     int             numParams;              /* number of parameters passed to query */
+
+    Oid            *param_type; /* Type information for params */
     FmgrInfo       *param_flinfo;   /* output conversion functions for them */
     List           *param_exprs;        /* executable expressions for param values */
     const char    **param_values;  /* textual values of query parameters */
 
     QuasarConn *conn;
 } QuasarFdwScanState;
-
-/*
- * Workspace for analyzing a foreign table.
- */
-typedef struct PgFdwAnalyzeState
-{
-    Relation       rel;         /* relcache entry for the foreign table */
-    AttInMetadata *attinmeta;   /* attribute datatype conversion metadata */
-    List          *retrieved_attrs;    /* attr numbers retrieved by query */
-
-    /* collected sample rows */
-    HeapTuple  *rows;                   /* array of size targrows */
-    int         targrows;               /* target # of sample rows */
-    int         numrows;                /* # of sample rows collected */
-
-    /* for random sampling */
-    double      samplerows;             /* # of rows fetched */
-    double      rowstoskip;             /* # of rows to skip before next sample */
-
-    /* working memory contexts */
-    MemoryContext anl_cxt;              /* context for per-analyze lifespan data */
-    MemoryContext temp_cxt;             /* context for per-tuple temporary data */
-} PgFdwAnalyzeState;
 
 /*
  * Identify the attribute where data conversion fails.
@@ -920,6 +899,7 @@ quasarBeginForeignScan(ForeignScanState *node,
     /* prepare for output conversion of parameters used in remote query. */
     numParams = list_length(fsplan->fdw_exprs);
     fsstate->numParams = numParams;
+    fsstate->param_type = (Oid *) palloc0(sizeof(Oid) * numParams);
     fsstate->param_flinfo = (FmgrInfo *) palloc0(sizeof(FmgrInfo) * numParams);
 
     i = 0;
@@ -929,7 +909,8 @@ quasarBeginForeignScan(ForeignScanState *node,
         Oid         typefnoid;
         bool        isvarlena;
 
-        getTypeOutputInfo(exprType(param_expr), &typefnoid, &isvarlena);
+        fsstate->param_type[i] = exprType(param_expr);
+        getTypeOutputInfo(fsstate->param_type[i], &typefnoid, &isvarlena);
         fmgr_info(typefnoid, &fsstate->param_flinfo[i]);
         i++;
     }
@@ -1352,11 +1333,17 @@ renderParams(QuasarFdwScanState *fsstate, ExprContext *econtext)
              * type-specific output function, unless the value is null.
              */
             if (isNull)
-                fsstate->param_values[i] = NULL;
+                fsstate->param_values[i] = pstrdup("NULL");
             else
-                fsstate->param_values[i] =
-                    OutputFunctionCall(&fsstate->param_flinfo[i],
-                                       expr_value);
+            {
+                StringInfoData buf;
+                initStringInfo(&buf);
+                deparseLiteral(&buf, fsstate->param_type[i],
+                               OutputFunctionCall(&fsstate->param_flinfo[i],
+                                                  expr_value));
+
+                fsstate->param_values[i] = buf.data;
+            }
             i++;
         }
 

@@ -1037,7 +1037,6 @@ deparseConst(Const *node, deparse_expr_cxt *context)
     Oid                     typoutput;
     bool            typIsVarlena;
     char       *extval;
-    bool            isfloat = false;
 
     if (node->constisnull)
     {
@@ -1048,53 +1047,7 @@ deparseConst(Const *node, deparse_expr_cxt *context)
     getTypeOutputInfo(node->consttype,
                       &typoutput, &typIsVarlena);
     extval = OidOutputFunctionCall(typoutput, node->constvalue);
-
-    switch (node->consttype)
-    {
-    case INT2OID:
-    case INT4OID:
-    case INT8OID:
-    case OIDOID:
-    case FLOAT4OID:
-    case FLOAT8OID:
-    case NUMERICOID:
-    {
-        /*
-         * No need to quote unless it's a special value such as 'NaN'.
-         * See comments in get_const_expr().
-         */
-        if (strspn(extval, "0123456789+-eE.") == strlen(extval))
-        {
-            if (extval[0] == '+' || extval[0] == '-')
-                appendStringInfo(buf, "(%s)", extval);
-            else
-                appendStringInfoString(buf, extval);
-            if (strcspn(extval, "eE.") != strlen(extval))
-                isfloat = true; /* it looks like a float */
-        }
-        else
-            appendStringInfo(buf, "'%s'", extval);
-    }
-    break;
-    case BOOLOID:
-        if (strcmp(extval, "t") == 0)
-            appendStringInfoString(buf, "true");
-        else
-            appendStringInfoString(buf, "false");
-        break;
-    case DATEOID:
-        appendStringInfo(buf, "DATE '%s'", extval);
-        break;
-    case TIMESTAMPOID:
-        appendStringInfo(buf, "TIMESTAMP '%s'", extval);
-        break;
-    case INTERVALOID:
-        appendStringInfo(buf, "INTERVAL '%s'", extval);
-        break;
-    default:
-        deparseStringLiteral(buf, extval);
-        break;
-    }
+    deparseLiteral(buf, node->consttype, extval);
 }
 
 /*
@@ -1537,4 +1490,51 @@ quasar_quote_identifier(const char *s) {
         appendStringInfoChar(&buf, '"');
 
     return buf.data;
+}
+
+extern void
+deparseLiteral(StringInfo buf, Oid type, const char *svalue)
+{
+    switch (type)
+    {
+    case INT2OID:
+    case INT4OID:
+    case INT8OID:
+    case OIDOID:
+    case FLOAT4OID:
+    case FLOAT8OID:
+    case NUMERICOID:
+    {
+        /* Check for NaN */
+        if (strspn(svalue, "0123456789+-eE.") == strlen(svalue))
+        {
+            if (svalue[0] == '+' || svalue[0] == '-')
+                appendStringInfo(buf, "(%s)", svalue);
+            else
+                appendStringInfoString(buf, svalue);
+        }
+        else
+            /* Quasar cannot handle 'NaN', so we emit null */
+            appendStringInfoString(buf, "NULL");
+    }
+    break;
+    case BOOLOID:
+        if (strcmp(svalue, "t") == 0)
+            appendStringInfoString(buf, "true");
+        else
+            appendStringInfoString(buf, "false");
+        break;
+    case DATEOID:
+        appendStringInfo(buf, "DATE '%s'", svalue);
+        break;
+    case TIMESTAMPOID:
+        appendStringInfo(buf, "TIMESTAMP '%s'", svalue);
+        break;
+    case INTERVALOID:
+        appendStringInfo(buf, "INTERVAL '%s'", svalue);
+        break;
+    default:
+        deparseStringLiteral(buf, svalue);
+        break;
+    }
 }
