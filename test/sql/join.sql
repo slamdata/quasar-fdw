@@ -17,3 +17,5 @@ EXPLAIN (COSTS off) SELECT * FROM smallzips z1 LEFT OUTER JOIN zips_missing z2 O
 SELECT * FROM smallzips z1 LEFT OUTER JOIN zips_missing z2 ON z1.city = z2.missing LIMIT 2;
 EXPLAIN (COSTS off) SELECT * FROM smallzips z1 RIGHT OUTER JOIN zips_missing z2 ON z1.city = z2.missing;
 SELECT * FROM smallzips z1 RIGHT OUTER JOIN zips_missing z2 ON z1.city = z2.missing LIMIT 2;
+/* zips_re state field has a join_rowcount_estimate of 500 so it will use Hash join on some small joins */
+EXPLAIN (COSTS off) SELECT * FROM zips_re z1, zips_re z2 WHERE z1.state = z2.state AND z1.city IN ('BARRE', 'AGAWAM');

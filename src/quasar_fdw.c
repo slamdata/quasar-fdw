@@ -201,6 +201,8 @@ static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
                                       void *arg);
 static void renderParams(QuasarFdwScanState *fsstate,
                          ExprContext *econtext);
+Cost estimate_join_rowcount(List *exprs, RelOptInfo *baserel, PlannerInfo *root);
+Cost estimate_join_rowcount_expr(Expr *expr, RelOptInfo *baserel, PlannerInfo *root);
 
 
 /*
@@ -293,7 +295,6 @@ quasarGetForeignRelSize(PlannerInfo *root,
     fpinfo->use_remote_estimate = false;
     fpinfo->fdw_startup_cost = DEFAULT_FDW_STARTUP_COST;
     fpinfo->fdw_tuple_cost = DEFAULT_FDW_TUPLE_COST;
-    fpinfo->join_rowcount_estimate = DEFAULT_FDW_JOIN_ROWCOUNT_ESTIMATE;
     fpinfo->shippable_extensions = NIL;
 
     foreach(lc, fpinfo->server->options)
@@ -313,8 +314,6 @@ quasarGetForeignRelSize(PlannerInfo *root,
 
         if (strcmp(def->defname, "use_remote_estimate") == 0)
             fpinfo->use_remote_estimate = defGetBoolean(def);
-        else if (strcmp(def->defname, "join_rowcount_estimate") == 0)
-            fpinfo->join_rowcount_estimate = strtod(defGetString(def), NULL);
     }
 
     /*
@@ -1165,7 +1164,7 @@ estimate_path_cost_size(PlannerInfo *root,
 
     if (remote_join_conds)
     {
-        rows = fpinfo->join_rowcount_estimate;
+        rows = estimate_join_rowcount(remote_join_conds, baserel, root);
     }
     else if (fpinfo->use_remote_estimate)
     {
@@ -1299,5 +1298,72 @@ renderParams(QuasarFdwScanState *fsstate, ExprContext *econtext)
         }
 
         MemoryContextSwitchTo(oldcontext);
+    }
+}
+
+/* Recursively parse RestrictInfo clauses
+ * to find variables with `join_rowcount_estimate`
+ * option, to estimate the rowcount of join clauses.
+ */
+Cost estimate_join_rowcount(List *exprs, RelOptInfo *baserel, PlannerInfo *root)
+{
+    Cost rowcount = 0;
+    ListCell *lc;
+
+    foreach(lc, exprs)
+    {
+        Cost rc = estimate_join_rowcount_expr(lfirst(lc), baserel, root);
+        if ((rowcount == 0) || (rc > 0 && rc < rowcount))
+            rowcount = rc;
+    }
+    return rowcount;
+}
+
+Cost estimate_join_rowcount_expr(Expr *expr, RelOptInfo *baserel, PlannerInfo *root)
+{
+    switch (nodeTag(expr))
+    {
+    case T_Var:
+    {
+        Var *var = (Var *)expr;
+        if (var->varno == baserel->relid &&
+            var->varlevelsup == 0)
+        {
+            RangeTblEntry *rte = planner_rt_fetch(var->varno, root);
+            List *options = GetForeignColumnOptions(rte->relid, var->varattno);
+            ListCell *lc;
+
+            foreach (lc, options)
+            {
+                DefElem *def = (DefElem*)lfirst(lc);
+                if (strcmp(def->defname, "join_rowcount_estimate") == 0)
+                {
+                    return strtod(defGetString(def), NULL);
+                }
+            }
+            return DEFAULT_FDW_JOIN_ROWCOUNT_ESTIMATE;
+        }
+        return 0;
+    }
+    case T_ArrayRef:
+        return estimate_join_rowcount_expr(((ArrayRef *)expr)->refexpr, baserel, root);
+    case T_FuncExpr:
+        return estimate_join_rowcount(((FuncExpr*)expr)->args, baserel, root);
+    case T_OpExpr:
+        return estimate_join_rowcount(((OpExpr*)expr)->args, baserel, root);
+    case T_ScalarArrayOpExpr:
+        return estimate_join_rowcount(((ScalarArrayOpExpr*)expr)->args, baserel, root);
+    case T_RelabelType:
+        return estimate_join_rowcount_expr(((RelabelType*)expr)->arg, baserel, root);
+    case T_BoolExpr:
+        return estimate_join_rowcount(((BoolExpr*)expr)->args, baserel, root);
+    case T_NullTest:
+        return estimate_join_rowcount_expr(((NullTest*)expr)->arg, baserel, root);
+    case T_ArrayExpr:
+        return estimate_join_rowcount(((ArrayExpr*)expr)->elements, baserel, root);
+    case T_RestrictInfo:
+        return estimate_join_rowcount_expr(((RestrictInfo*)expr)->clause, baserel, root);
+    default:
+        return 0;
     }
 }

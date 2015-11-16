@@ -70,7 +70,6 @@ typedef struct QuasarFdwRelationInfo
     bool            use_remote_estimate;
     Cost            fdw_startup_cost;
     Cost            fdw_tuple_cost;
-    Cost            join_rowcount_estimate;
     List       *shippable_extensions;       /* OIDs of whitelisted extensions */
 
     /* Cached catalog information. */
