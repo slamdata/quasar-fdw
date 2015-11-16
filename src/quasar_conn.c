@@ -28,6 +28,7 @@ char * execute_info_curl(QuasarConn *conn, char *url);
 static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf);
 static size_t query_body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 static size_t info_body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
+static size_t throwaway_body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 static size_t count_line_endings(const char *buffer, size_t size);
 void appendStringInfoQuery(CURL *curl,
                            StringInfo buf,
@@ -168,6 +169,7 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &infoctx);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, throwaway_body_handler);
 
     elog(DEBUG1, "curling %s with query %s", url.data, query);
     sc = curl_easy_perform(curl);
@@ -345,6 +347,7 @@ execute_info_curl(QuasarConn *conn, char *url)
 
     elog(DEBUG1, "quasar_fdw: Curling for information %s", url);
     cc = curl_easy_perform(curl);
+
     if (cc != CURLE_OK)
     {
         QuasarCleanupConnection(conn);
@@ -382,6 +385,12 @@ header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
     }
 
     return segsize;
+}
+
+static size_t
+throwaway_body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
+{
+    return size * nmemb;
 }
 
 static size_t
