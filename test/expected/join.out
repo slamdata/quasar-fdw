@@ -1,79 +1,78 @@
 /* We are comparing JOIN explanations (and verifying outputs)
  * for tables with use_remote_estimate on and off */
-/* Merge join because theres no remote estimation on */
-EXPLAIN SELECT z1.city, z2.state FROM smallzips z1, zips z2 WHERE z1.city = z2.city;
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
- Merge Join  (cost=443.11..581.14 rows=8801 width=44)
-   Merge Cond: ((z2.city)::text = (z1.city)::text)
-   ->  Sort  (cost=209.93..212.94 rows=1204 width=44)
-         Sort Key: z2.city
-         ->  Foreign Scan on zips z2  (cost=101.00..148.32 rows=1204 width=44)
-               Quasar query: SELECT "city", "state" FROM "zips"
-   ->  Sort  (cost=233.18..236.83 rows=1462 width=32)
+/* Big joins are merge joins */
+EXPLAIN SELECT * FROM zips_re z1, zips_re z2 WHERE z1.city = z2.city;
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Merge Join  (cost=5869.88..70636.54 rows=4307993 width=96)
+   Merge Cond: ((z1.city)::text = (z2.city)::text)
+   ->  Sort  (cost=2934.94..3008.32 rows=29353 width=48)
          Sort Key: z1.city
-         ->  Foreign Scan on smallzips z1  (cost=101.00..156.32 rows=1462 width=32)
-               Quasar query: SELECT "city" FROM "smallZips"
+         ->  Foreign Scan on zips_re z1  (cost=111.00..756.77 rows=29353 width=48)
+               Quasar query: SELECT "city", "pop", "state" FROM "zips"
+   ->  Sort  (cost=2934.94..3008.32 rows=29353 width=48)
+         Sort Key: z2.city
+         ->  Foreign Scan on zips_re z2  (cost=111.00..756.77 rows=29353 width=48)
+               Quasar query: SELECT "city", "pop", "state" FROM "zips"
 (10 rows)
 
-SELECT z1.city, z2.state FROM smallzips z1, zips z2 WHERE z1.city = z2.city LIMIT 10;
-    city     | state 
--------------+-------
- BELCHERTOWN | MA
- BARRE       | MA
- BARRE       | VT
- AGAWAM      | MA
- CUSHMAN     | MA
- CUSHMAN     | AR
- BLANDFORD   | MA
- BRIMFIELD   | MA
- BRIMFIELD   | IL
- CHESTER     | MA
+SELECT * FROM zips_re z1, zips_re z2 WHERE z1.city = z2.city LIMIT 10;
+    city     |  pop  | state | city  |  pop  | state 
+-------------+-------+-------+-------+-------+-------
+ BARRE       |  4546 | MA    | BARRE |  4546 | MA
+ BARRE       |  4546 | MA    | BARRE | 14994 | VT
+ AGAWAM      | 15338 | MA    | BARRE |  4546 | MA
+ AGAWAM      | 15338 | MA    | BARRE | 14994 | VT
+ BLANDFORD   |  1240 | MA    | BARRE |  4546 | MA
+ BLANDFORD   |  1240 | MA    | BARRE | 14994 | VT
+ BELCHERTOWN | 10579 | MA    | BARRE |  4546 | MA
+ BELCHERTOWN | 10579 | MA    | BARRE | 14994 | VT
+ CUSHMAN     | 36963 | MA    | BARRE |  4546 | MA
+ CUSHMAN     | 36963 | MA    | BARRE | 14994 | VT
 (10 rows)
 
-/* Hash join with no sort after remote estimation is on */
-EXPLAIN SELECT z1.city, z2.state FROM smallzips_re z1, zips_re z2 WHERE z1.city = z2.city;
-                                      QUERY PLAN                                      
---------------------------------------------------------------------------------------
- Hash Join  (cost=225.45..1458.28 rows=14676 width=44)
+/* Hash join with no sort on large table joining smaller one */
+EXPLAIN SELECT * FROM zips_re z1, zips_re z2 WHERE z1.pop > 60000 AND z1.city = z2.city;
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Hash Join  (cost=227.69..1776.06 rows=24216 width=96)
    Hash Cond: ((z2.city)::text = (z1.city)::text)
-   ->  Foreign Scan on zips_re z2  (cost=111.00..756.77 rows=29353 width=44)
-         Quasar query: SELECT "city", "state" FROM "zips"
-   ->  Hash  (cost=113.20..113.20 rows=100 width=32)
-         ->  Foreign Scan on smallzips_re z1  (cost=111.00..113.20 rows=100 width=32)
-               Quasar query: SELECT "city" FROM "smallZips"
+   ->  Foreign Scan on zips_re z2  (cost=111.00..756.77 rows=29353 width=48)
+         Quasar query: SELECT "city", "pop", "state" FROM "zips"
+   ->  Hash  (cost=114.63..114.63 rows=165 width=48)
+         ->  Foreign Scan on zips_re z1  (cost=111.00..114.63 rows=165 width=48)
+               Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("pop" > 60000))
 (7 rows)
 
-SELECT z1.city, z2.state FROM smallzips_re z1, zips_re z2 WHERE z1.city = z2.city LIMIT 10;
-     city     | state 
---------------+-------
- BARRE        | MA
- AGAWAM       | MA
- BLANDFORD    | MA
- BELCHERTOWN  | MA
- CUSHMAN      | MA
- BRIMFIELD    | MA
- CHESTER      | MA
- CHESTERFIELD | MA
- CHICOPEE     | MA
- CHICOPEE     | MA
+SELECT * FROM zips_re z1, zips_re z2 WHERE z1.pop > 60000 AND z1.city = z2.city LIMIT 10;
+    city     |  pop  | state |    city     |  pop  | state 
+-------------+-------+-------+-------------+-------+-------
+ FLORENCE    | 66990 | SC    | FLORENCE    | 27939 | MA
+ WESTMINSTER | 77965 | CA    | WESTMINSTER |  6191 | MA
+ FRAMINGHAM  | 65046 | MA    | FRAMINGHAM  | 65046 | MA
+ LEXINGTON   | 69179 | NC    | LEXINGTON   | 28994 | MA
+ BRISTOL     | 60670 | CT    | BRISTOL     | 21625 | RI
+ BRISTOL     | 60670 | CT    | BRISTOL     |  4288 | NH
+ WASHINGTON  | 62924 | DC    | WASHINGTON  |   628 | NH
+ ALTON       | 67604 | TX    | ALTON       |  2939 | NH
+ BRISTOL     | 60670 | CT    | BRISTOL     |  1220 | ME
+ WASHINGTON  | 62924 | DC    | WASHINGTON  |  1261 | ME
 (10 rows)
 
-/* Nested loop because we only want a small number of records */
-EXPLAIN SELECT z1.city, z2.state FROM smallzips_re z1, zips_re z2 WHERE z1.city = z2.city AND z1.city = 'BARRE';
-                                     QUERY PLAN                                      
--------------------------------------------------------------------------------------
- Nested Loop  (cost=222.00..222.09 rows=2 width=44)
-   ->  Foreign Scan on smallzips_re z1  (cost=111.00..111.02 rows=1 width=32)
-         Quasar query: SELECT "city" FROM "smallZips" WHERE (("city" = 'BARRE'))
-   ->  Foreign Scan on zips_re z2  (cost=111.00..111.04 rows=2 width=44)
-         Quasar query: SELECT "city", "state" FROM "zips" WHERE (("city" = 'BARRE'))
+/* Nested loop join when a tiny number of records */
+EXPLAIN SELECT * FROM zips_re z1, zips_re z2 WHERE z1.pop > 60000 AND z1.state = 'MA' AND z1.city = z2.city;
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=222.00..222.05 rows=147 width=96)
+   ->  Foreign Scan on zips_re z1  (cost=111.00..111.02 rows=1 width=48)
+         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("pop" > 60000)) AND (("state" = 'MA'))
+   ->  Foreign Scan on zips_re z2  (cost=111.00..111.02 rows=1 width=48)
+         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE ((:p1 = "city"))
 (5 rows)
 
-SELECT z1.city, z2.state FROM smallzips_re z1, zips_re z2 WHERE z1.city = z2.city AND z1.city = 'BARRE';
- city  | state 
--------+-------
- BARRE | MA
- BARRE | VT
-(2 rows)
+SELECT * FROM zips_re z1, zips_re z2 WHERE z1.pop > 60000 AND z1.state = 'MA' AND z1.city = z2.city;
+    city    |  pop  | state |    city    |  pop  | state 
+------------+-------+-------+------------+-------+-------
+ FRAMINGHAM | 65046 | MA    | FRAMINGHAM | 65046 | MA
+(1 row)
 

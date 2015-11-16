@@ -37,7 +37,8 @@
 #define DEFAULT_FDW_TUPLE_COST 0.01
 /* Multiplier on cost to sort (~= n * log n) */
 #define DEFAULT_FDW_SORT_MULTIPLIER 1.2 /* 20% */
-#define FDW_JOIN_MULTIPLIER 0.01        /* 1% */
+/* ASSUME join conditions limit rowcount to 1 */
+#define DEFAULT_FDW_JOIN_ROWCOUNT_ESTIMATE 1
 #define QUASAR_STARTUP_COST 10.0
 #define QUASAR_PER_TUPLE_COST 0.001
 
@@ -69,6 +70,7 @@ typedef struct QuasarFdwRelationInfo
     bool            use_remote_estimate;
     Cost            fdw_startup_cost;
     Cost            fdw_tuple_cost;
+    Cost            join_rowcount_estimate;
     List       *shippable_extensions;       /* OIDs of whitelisted extensions */
 
     /* Cached catalog information. */

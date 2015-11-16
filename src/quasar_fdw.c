@@ -293,6 +293,7 @@ quasarGetForeignRelSize(PlannerInfo *root,
     fpinfo->use_remote_estimate = false;
     fpinfo->fdw_startup_cost = DEFAULT_FDW_STARTUP_COST;
     fpinfo->fdw_tuple_cost = DEFAULT_FDW_TUPLE_COST;
+    fpinfo->join_rowcount_estimate = DEFAULT_FDW_JOIN_ROWCOUNT_ESTIMATE;
     fpinfo->shippable_extensions = NIL;
 
     foreach(lc, fpinfo->server->options)
@@ -311,10 +312,9 @@ quasarGetForeignRelSize(PlannerInfo *root,
         DefElem    *def = (DefElem *) lfirst(lc);
 
         if (strcmp(def->defname, "use_remote_estimate") == 0)
-        {
             fpinfo->use_remote_estimate = defGetBoolean(def);
-            break;                            /* only need the one value */
-        }
+        else if (strcmp(def->defname, "join_rowcount_estimate") == 0)
+            fpinfo->join_rowcount_estimate = strtod(defGetString(def), NULL);
     }
 
     /*
@@ -525,14 +525,6 @@ quasarGetForeignPaths(PlannerInfo *root,
                                          NULL,
                                          NIL));
     }
-
-    /*
-     * If we're not using remote estimates, stop here.  We have no way to
-     * estimate whether any join clauses would be worth sending across, so
-     * don't bother building parameterized paths.
-     */
-    if (!fpinfo->use_remote_estimate)
-        return;
 
     /*
      * Thumb through all join clauses for the rel to identify which outer
@@ -1155,32 +1147,29 @@ estimate_path_cost_size(PlannerInfo *root,
     int                 width;
     Cost                startup_cost;
     Cost                total_cost;
-    Cost                run_cost;
     Cost                cpu_per_tuple;
 
-    /*
-     * If the table or the server is configured to use remote estimates,
-     * connect to the foreign server and execute a COUNT to estimate the
-     * number of rows selected by the restriction+join clauses.  Otherwise,
-     * estimate rows using whatever statistics we have		, in a way
-     * similar 		ary tables.
-     */
-    if (fpinfo->use_remote_estimate)
-    {
-        List *remote_join_conds;
-        List *local_join_conds;
-        StringInfoData sql;
-        List       *retrieved_attrs;
-        Selectivity local_sel;
-        QualCost        local_cost;
-        QuasarConn *conn;
+    List *remote_join_conds;
+    List *local_join_conds;
+    StringInfoData sql;
+    List       *retrieved_attrs;
+    Selectivity local_sel;
+    QualCost        local_cost;
 
-        /*
-         * join_conds might contain both clauses that are safe to send across,
-         * and clauses that aren't.
-         */
-        classifyConditions(root, baserel, join_conds,
-                           &remote_join_conds, &local_join_conds);
+    /*
+     * join_conds might contain both clauses that are safe to send across,
+     * and clauses that aren't.
+     */
+    classifyConditions(root, baserel, join_conds,
+                       &remote_join_conds, &local_join_conds);
+
+    if (remote_join_conds)
+    {
+        rows = fpinfo->join_rowcount_estimate;
+    }
+    else if (fpinfo->use_remote_estimate)
+    {
+        QuasarConn *conn;
 
         /*
          * Construct a SELECT count(*) with only the WHERE clauses.
@@ -1193,10 +1182,13 @@ estimate_path_cost_size(PlannerInfo *root,
         if (fpinfo->remote_conds)
             appendWhereClause(&sql, root, baserel, fpinfo->remote_conds,
                               true, NULL);
+
+        /* Parameterized JOINS would make row estimate bad */
         /* if (remote_join_conds) */
         /*     appendWhereClause(&sql, root, baserel, remote_join_conds, */
         /*                       (fpinfo->remote_conds == NIL), NULL); */
 
+        /* ORDER BY isn't estimated by SELECT count(*) */
         /* if (pathkeys) */
         /*     appendOrderByClause(&sql, root, baserel, pathkeys); */
 
@@ -1204,84 +1196,43 @@ estimate_path_cost_size(PlannerInfo *root,
         conn = QuasarGetConnection(fpinfo->server);
         rows = QuasarEstimateRows(conn, sql.data);
         QuasarCleanupConnection(conn);
-
-        /* Ideally quasar gives these to us but we have to improvise */
-        width = baserel->width;
-
-        startup_cost = QUASAR_STARTUP_COST;
-        cpu_per_tuple = QUASAR_PER_TUPLE_COST;
-        if (pathkeys)
-            cpu_per_tuple *= DEFAULT_FDW_SORT_MULTIPLIER;
-        total_cost = startup_cost + rows * cpu_per_tuple;
-
-        retrieved_rows = rows;
-
-        /* Estimate less rows with a join condition */
-        if (remote_join_conds)
-            total_cost *= FDW_JOIN_MULTIPLIER;
-
-        elog(DEBUG1, "Estimating path cost with remote_enabled: %s %f %f",
-             sql.data, rows, total_cost);
-
-        /* Factor in the selectivity of the locally-checked quals */
-        local_sel = clauselist_selectivity(root,
-                                           local_join_conds,
-                                           baserel->relid,
-                                           JOIN_INNER,
-                                           NULL);
-        local_sel *= fpinfo->local_conds_sel;
-
-        rows = clamp_row_est(rows * local_sel);
-
-        /* Add in the eval cost of the locally-checked quals */
-        startup_cost += fpinfo->local_conds_cost.startup;
-        total_cost += fpinfo->local_conds_cost.per_tuple * retrieved_rows;
-        cost_qual_eval(&local_cost, local_join_conds, root);
-        startup_cost += local_cost.startup;
-        total_cost += local_cost.per_tuple * retrieved_rows;
-    } else {
-
-        /* Use rows/width estimates made by set_baserel_size_estimates. */
-        rows = baserel->rows;
-        width = baserel->width;
-
-        /*
-         * Back into an estimate of the number of retrieved rows.  Just in
-         * case this is nuts, clamp to at most baserel->tuples.
-         */
-        retrieved_rows = clamp_row_est(rows / fpinfo->local_conds_sel);
-        retrieved_rows = Min(retrieved_rows, baserel->tuples);
-
-        /*
-         * Cost as though this were a seqscan, which is pessimistic.  We
-         * effectively imagine the local_conds are being evaluated remotely,
-         * too.
-         */
-        startup_cost = 0;
-        run_cost = 0;
-        run_cost += seq_page_cost * baserel->pages;
-
-        startup_cost += baserel->baserestrictcost.startup;
-        cpu_per_tuple = cpu_tuple_cost + baserel->baserestrictcost.per_tuple;
-        run_cost += cpu_per_tuple * baserel->tuples;
-
-        /*
-         * Without remote estimates, we have no real way to estimate the cost
-         * of generating sorted output.  It could be free if the query plan
-         * the remote side would have chosen generates properly-sorted output
-         * anyway, but in most cases it will cost something.  Estimate a value
-         * high enough that we won't pick the sorted path when the ordering
-         * isn't locally useful, but low enough that we'll err on the side of
-         * pushing down the ORDER BY clause when it's useful to do so.
-         */
-        if (pathkeys != NIL)
-        {
-            startup_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
-            run_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
-        }
-
-        total_cost = startup_cost + run_cost;
     }
+    else
+    {
+        rows = baserel->rows;
+    }
+
+    /* Ideally quasar gives these to us but we have to improvise */
+    width = baserel->width;
+
+    startup_cost = QUASAR_STARTUP_COST;
+    cpu_per_tuple = QUASAR_PER_TUPLE_COST;
+    if (pathkeys)
+        cpu_per_tuple *= DEFAULT_FDW_SORT_MULTIPLIER;
+
+    total_cost = startup_cost + rows * cpu_per_tuple;
+    retrieved_rows = rows;
+
+    elog(DEBUG1, "Estimating path cost with remote_enabled: %s %f %f",
+         sql.data, rows, total_cost);
+
+    /* Factor in the selectivity of the locally-checked quals */
+    local_sel = clauselist_selectivity(root,
+                                       local_join_conds,
+                                       baserel->relid,
+                                       JOIN_INNER,
+                                       NULL);
+    local_sel *= fpinfo->local_conds_sel;
+
+    rows = clamp_row_est(rows * local_sel);
+
+    /* Add in the eval cost of the locally-checked quals */
+    startup_cost += fpinfo->local_conds_cost.startup;
+    total_cost += fpinfo->local_conds_cost.startup +
+        fpinfo->local_conds_cost.per_tuple * retrieved_rows;
+    cost_qual_eval(&local_cost, local_join_conds, root);
+    startup_cost += local_cost.startup;
+    total_cost += local_cost.per_tuple * retrieved_rows;
 
     /*
      * Add some additional cost factors to account for connection overhead
