@@ -196,8 +196,8 @@ function help()
 
 function error()
 {
-    if [[ ! -z $1 ]]; then
-        log $1
+    if [[ ! -z "$@" ]]; then
+        log "$@"
     else
         log "Unknown error"
     fi
@@ -251,6 +251,8 @@ function mypopdall()
 case "$1" in
     -h|--help)
         help
+        ;;
+    "")
         ;;
     *)
         error "Unknown option. Try --help"
