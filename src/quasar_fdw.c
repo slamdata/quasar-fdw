@@ -1290,7 +1290,8 @@ renderParams(QuasarFdwScanState *fsstate, ExprContext *econtext)
                 initStringInfo(&buf);
                 deparseLiteral(&buf, fsstate->param_type[i],
                                OutputFunctionCall(&fsstate->param_flinfo[i],
-                                                  expr_value));
+                                                  expr_value),
+                               expr_value);
 
                 fsstate->param_values[i] = buf.data;
             }

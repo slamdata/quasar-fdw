@@ -34,13 +34,17 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "datatype/timestamp.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
+#include "pgtime.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/timestamp.h"
 #include "utils/syscache.h"
 
 
@@ -1047,7 +1051,7 @@ deparseConst(Const *node, deparse_expr_cxt *context)
     getTypeOutputInfo(node->consttype,
                       &typoutput, &typIsVarlena);
     extval = OidOutputFunctionCall(typoutput, node->constvalue);
-    deparseLiteral(buf, node->consttype, extval);
+    deparseLiteral(buf, node->consttype, extval, node->constvalue);
 }
 
 /*
@@ -1493,7 +1497,7 @@ quasar_quote_identifier(const char *s) {
 }
 
 extern void
-deparseLiteral(StringInfo buf, Oid type, const char *svalue)
+deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
 {
     switch (type)
     {
@@ -1525,13 +1529,36 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue)
             appendStringInfoString(buf, "false");
         break;
     case DATEOID:
-        appendStringInfo(buf, "DATE '%s'", svalue);
-        break;
+    {
+        struct pg_tm tm;
+        fsec_t fsec;
+
+        if (timestamp2tm(date2timestamp_no_overflow(DatumGetDateADT(value)),
+                         NULL, &tm, &fsec, NULL, NULL))
+        {
+            elog(ERROR, "quasar_fdw: Couldn't convert date value to pg_tm struct");
+        }
+        appendStringInfo(buf, "(DATE '%04d-%02d-%02d')",
+                         tm.tm_year, tm.tm_mon, tm.tm_mday);
+    }
+    break;
     case TIMESTAMPOID:
-        appendStringInfo(buf, "TIMESTAMP '%s'", svalue);
-        break;
+    {
+        struct pg_tm tm;
+        fsec_t fsec;
+
+        if (timestamp2tm(DatumGetTimestamp(value), NULL, &tm, &fsec, NULL, NULL))
+        {
+            elog(ERROR, "quasar_fdw: Couldn't convert timestamp to pg_tm struct");
+        }
+
+        appendStringInfo(buf, "(TIMESTAMP '%04d-%02d-%02dT%02d:%02d:%02dZ')",
+                         tm.tm_year, tm.tm_mon, tm.tm_mday,
+                         tm.tm_hour, tm.tm_min, tm.tm_sec);
+    }
+    break;
     case INTERVALOID:
-        appendStringInfo(buf, "INTERVAL '%s'", svalue);
+        appendStringInfo(buf, "(INTERVAL '%s')", svalue);
         break;
     default:
         deparseStringLiteral(buf, svalue);

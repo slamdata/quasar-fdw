@@ -24,6 +24,10 @@ CREATE FOREIGN TABLE commits
        ,url varchar
        ,comment_count integer OPTIONS (map 'commit.comment_count'))
        SERVER quasar OPTIONS (table 'slamengine_commits');
+CREATE FOREIGN TABLE commits_timestamps
+       (ts timestamp OPTIONS (map 'commit.author.date')
+       ,sha varchar)
+       SERVER quasar OPTIONS (table 'slamengine_commits_dates');
 CREATE FOREIGN TABLE olympics
        (yr char(4) OPTIONS (map 'year')
        ,yearint integer OPTIONS (map 'year')

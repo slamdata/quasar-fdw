@@ -46,3 +46,7 @@ SELECT * FROM user_comments;
 SELECT * FROM nested_expansion;
 /* ORDER BY pushdown */
 SELECT * FROM zips ORDER BY length(city), -pop, state LIMIT 10;
+/* Date pushdown and ordering */
+SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIMIT 2;
+SELECT * FROM commits_timestamps WHERE ts < DATE '2015-01-20' LIMIT 2;
+SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;

@@ -65,6 +65,8 @@ override pg_regress_clean_files = test/results/ test/regression.diffs test/regre
 
 import-test-data:
 	$(QUASAR_DIR)/scripts/importTestData $(MONGO_HOST) $(MONGO_PORT) $(MONGO_DB)
+	wget https://raw.githubusercontent.com/damonLL/tutorial_files/master/slamengine_commits	-O /tmp/slamengine_commits
+	mongoimport --db=$(MONGO_DB) --collection=slamengine_commits_dates /tmp/slamengine_commits
 
 build-quasar:
 	cd $(QUASAR_DIR) && ./sbt 'project web' oneJar
