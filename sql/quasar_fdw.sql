@@ -2,11 +2,11 @@
  *
  *                foreign-data wrapper  quasar
  *
- * Copyright (c) 2013, PostgreSQL Global Development Group
+ * Copyright (c) 2015, SlamData Inc
  *
- * This software is released under the PostgreSQL Licence
+ * This software is released under the Apache 2 License
  *
- * Author:  Andrew Dunstan <andrew@dunslane.net>
+ * Author:  Jon Eisen <jon@joneisen.works>
  *
  * IDENTIFICATION
  *                quasar_fdw/=sql/quasar_fdw.sql
