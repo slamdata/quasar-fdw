@@ -32,10 +32,10 @@ Test an installation of quasar_fdw with local test files
 Options:
  --quasar-server SERV     Quasar Server URL (default http://localhost:8080)
  --quasar-path PATH       Quasar Test Data Path (default /test)
- --pg-host HOST           PostgreSQL Host
- --pg-port PORT           PostgreSQL Port
- --pg-user USER           PostgreSQL User
- --fdw-version VERS       Version of FDW to test
+ --pg-host HOST           PostgreSQL Host (defaults to local socket)
+ --pg-port PORT           PostgreSQL Port (default to 5432)
+ --pg-user USER           PostgreSQL User (default to jon)
+ --fdw-version VERS       Version of FDW to test (default to current)
  ```
 
 In order to run a test, you'll need a Quasar running with the test data set that comes with quasar installed at some path. You'll also need a PostgreSQL server running.

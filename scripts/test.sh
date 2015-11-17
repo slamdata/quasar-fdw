@@ -109,10 +109,10 @@ function help()
     echo "Options:"
     echo " --quasar-server SERV     Quasar Server URL (default http://localhost:8080)"
     echo " --quasar-path PATH       Quasar Test Data Path (default /test)"
-    echo " --pg-host HOST           PostgreSQL Host"
-    echo " --pg-port PORT           PostgreSQL Port"
-    echo " --pg-user USER           PostgreSQL User"
-    echo " --fdw-version VERS       Version of FDW to test"
+    echo " --pg-host HOST           PostgreSQL Host (defaults to local socket)"
+    echo " --pg-port PORT           PostgreSQL Port (default to 5432)"
+    echo " --pg-user USER           PostgreSQL User (default to $USER)"
+    echo " --fdw-version VERS       Version of FDW to test (default to current)"
 
     exit 1
 }
