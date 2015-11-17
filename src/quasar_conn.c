@@ -84,13 +84,13 @@ QuasarGetConnection(ForeignServer *server)
 }
 
 extern void
-QuasarPrepQuery(QuasarConn *conn, EState *estate, AttInMetadata *attinmeta)
+QuasarPrepQuery(QuasarConn *conn, EState *estate, Relation rel)
 {
     conn->curlm = curl_multi_init();
 
     conn->qctx = palloc0(sizeof(quasar_query_curl_context));
     conn->qctx->is_query = true;
-    quasar_parse_alloc(&conn->qctx->parse, attinmeta);
+    quasar_parse_alloc(&conn->qctx->parse, rel);
     conn->qctx->batch_count = 0;
     conn->qctx->batchmem = AllocSetContextCreate(estate->es_query_cxt,
                                                 "postgres_fdw tuple data",

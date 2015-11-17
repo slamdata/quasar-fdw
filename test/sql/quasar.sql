@@ -51,3 +51,7 @@ SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIM
 SELECT * FROM commits_timestamps WHERE ts < DATE '2015-01-20' LIMIT 2;
 SELECT * FROM commits_timestamps WHERE tstz < TIMESTAMPTZ '2015-01-15 19:43:04 PST';
 SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;
+/* Bad types should emit error contexts appropriately */
+SELECT city FROM zips_badtype;
+SELECT state FROM zips_badtype;
+SELECT pop FROM zips_badtype;

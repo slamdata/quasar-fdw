@@ -142,7 +142,7 @@ extern void QuasarResetConnection(QuasarConn *conn);
 
 extern void QuasarPrepQuery(QuasarConn *conn,
                             EState *estate,
-                            AttInMetadata *attinmeta);
+                            Relation rel);
 extern void QuasarExecuteQuery(QuasarConn *conn,
                                char *query,
                                const char **param_values,
@@ -159,7 +159,8 @@ extern Datum quasar_fdw_validator(PG_FUNCTION_ARGS);
 extern bool quasar_is_valid_option(const char *option, Oid context);
 
 /* quasar_parse.c headers */
-void quasar_parse_alloc(quasar_parse_context *ctx, AttInMetadata *attinmeta);
+void quasar_parse_alloc(quasar_parse_context *ctx,
+                        Relation rel);
 void quasar_parse_free(quasar_parse_context *ctx);
 void quasar_parse_reset(quasar_parse_context *ctx);
 bool quasar_parse(quasar_parse_context *ctx,

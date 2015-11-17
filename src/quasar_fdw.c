@@ -204,7 +204,6 @@ static void renderParams(QuasarFdwScanState *fsstate,
 Cost estimate_join_rowcount(List *exprs, RelOptInfo *baserel, PlannerInfo *root);
 Cost estimate_join_rowcount_expr(Expr *expr, RelOptInfo *baserel, PlannerInfo *root);
 
-
 /*
  * _PG_init
  *      Library load-time initalization.
@@ -851,7 +850,6 @@ quasarBeginForeignScan(ForeignScanState *node,
     int i;
     ListCell *lc;
     Relation rel;
-    AttInMetadata *attinmeta;
 
     elog(DEBUG1, "entering function %s", __func__);
 
@@ -881,11 +879,8 @@ quasarBeginForeignScan(ForeignScanState *node,
     fsstate->query = strVal(list_nth(fsplan->fdw_private,
                                      FdwScanPrivateSelectSql));
 
-    /* Get info we'll need for input data conversion. */
-    attinmeta = TupleDescGetAttInMetadata(RelationGetDescr(rel));
-
     /* Prepare our connection for a query */
-    QuasarPrepQuery(fsstate->conn, estate, attinmeta);
+    QuasarPrepQuery(fsstate->conn, estate, rel);
 
     /* prepare for output conversion of parameters used in remote query. */
     numParams = list_length(fsplan->fdw_exprs);

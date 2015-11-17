@@ -35,16 +35,24 @@
 #define COLUMN_LEVEL 1
 
 typedef struct parser {
+    /* Storing output data */
     Datum *values;
     bool *nulls;
-    AttInMetadata *attinmeta;
 
+    /* RElation data */
+    AttInMetadata *attinmeta;
+    Relation rel;
+
+    /* Internal flags */
     size_t cur_col;
     bool record_complete;
     int level;
     StringInfoData json;
     StringInfoData array;
     int warned;
+
+    /* Error callback */
+    ErrorContextCallback errcallback;
 } parser;
 
 /* Utilities */
@@ -57,6 +65,7 @@ static void store_datum(parser *p, char *string, const char *fmt);
 static void store_null(parser *p);
 bool warncheck(parser *p);
 char *checkConversions(parser *p, char *value);
+static void conversion_error_callback(void *arg);
 
 /* Alloc callbacks */
 void *yajl_palloc(void *ctx, size_t sz);
@@ -155,12 +164,19 @@ static void store_datum(parser *p, char *string, const char *fmt) {
 
     if (p->level == COLUMN_LEVEL &&
         !get_column(p)->attisdropped) {
+        /* Setup our error callback */
+        p->errcallback.previous = error_context_stack;
+        error_context_stack = &p->errcallback;
+
         string = checkConversions(p, string);
         p->values[i] = InputFunctionCall(&p->attinmeta->attinfuncs[i],
                                          string,
                                          p->attinmeta->attioparams[i],
                                          p->attinmeta->atttypmods[i]);
         p->nulls[i] = false;
+
+        /* Reset error stack */
+        error_context_stack = p->errcallback.previous;
     } else if (p->level > COLUMN_LEVEL && is_json_type(p)) {
         jsonAppendCommaIf(p);
         appendStringInfo(&p->json, fmt, string);
@@ -389,17 +405,21 @@ void yajl_pfree(void *ctx, void *ptr) {
 static yajl_alloc_funcs allocs = {yajl_palloc, yajl_repalloc, yajl_pfree, NULL};
 
 
-void quasar_parse_alloc(quasar_parse_context *ctx, AttInMetadata *attinmeta) {
+void quasar_parse_alloc(quasar_parse_context *ctx, Relation rel) {
     elog(DEBUG4, "entering function %s", __func__);
 
     parser *p = palloc(sizeof(parser));
     p->cur_col = NO_COLUMN;
     p->level = TOP_LEVEL;
     p->record_complete = false;
-    p->attinmeta = attinmeta;
-    p->values = palloc(attinmeta->tupdesc->natts * sizeof(Datum));
-    p->nulls = palloc(attinmeta->tupdesc->natts * sizeof(bool));
+    p->rel = rel;
+    p->attinmeta = TupleDescGetAttInMetadata(RelationGetDescr(rel));
+    p->values = palloc(p->attinmeta->tupdesc->natts * sizeof(Datum));
+    p->nulls = palloc(p->attinmeta->tupdesc->natts * sizeof(bool));
     p->warned = 0;
+    p->errcallback.callback = conversion_error_callback;
+    p->errcallback.arg = (void *)p;
+    p->rel = rel;
     initStringInfo(&p->json);
     initStringInfo(&p->array);
     ctx->p = p;
@@ -484,4 +504,21 @@ quasar_parse(quasar_parse_context *ctx,
     }
 
     return found;
+}
+
+
+/*
+ * Callback function which is called when error occurs during column value
+ * conversion.  Print names of column and relation.
+ */
+static void
+conversion_error_callback(void *arg)
+{
+    parser *p = (parser*) arg;
+    TupleDesc tupdesc = p->attinmeta->tupdesc;
+
+    if (p->cur_col < tupdesc->natts)
+        errcontext("column \"%s\" of foreign table \"%s\"",
+                   NameStr(tupdesc->attrs[p->cur_col]->attname),
+                   RelationGetRelationName(p->rel));
 }
