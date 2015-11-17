@@ -500,6 +500,13 @@ bool quasar_has_const(Const *node) {
             return false;
     }
     break;
+    case INTERVALOID:
+    {
+        Interval *span = DatumGetIntervalP(node->constvalue);
+        if (span->month > 0)
+            return false;
+    }
+    break;
     }
     return true;
 }
@@ -1573,8 +1580,20 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
     }
     break;
     case INTERVALOID:
-        appendStringInfo(buf, "(INTERVAL '%s')", svalue);
-        break;
+    {
+        Interval *span = DatumGetIntervalP(value);
+        struct pg_tm tm;
+        fsec_t fsec;
+
+        if (interval2tm(*span, &tm, &fsec))
+        {
+            elog(ERROR, "quasar_fdw: Couldn't convert interval to pg_tm struct");
+        }
+
+        appendStringInfo(buf, "(INTERVAL 'P%dDT%dH%dM%dS')",
+                         tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    }
+    break;
     default:
         deparseStringLiteral(buf, svalue);
         break;

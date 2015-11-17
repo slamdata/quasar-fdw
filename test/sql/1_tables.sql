@@ -63,4 +63,6 @@ CREATE FOREIGN TABLE smallzips_re(city varchar, pop integer, state char(2))
        SERVER quasar OPTIONS (table 'smallZips'
                              ,use_remote_estimate 'true');
 CREATE FOREIGN TABLE test_times(t time)
-       SERVER quasar OPTIONS (table 'testtime_doesnt_exist')
+       SERVER quasar OPTIONS (table 'testtime_doesnt_exist');
+CREATE FOREIGN TABLE test_intervals(i interval)
+       SERVER quasar OPTIONS (table 'testintervals_doesnt_exist');

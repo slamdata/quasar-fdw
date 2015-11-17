@@ -26,6 +26,7 @@ CREATE FOREIGN TABLE commits
        SERVER quasar OPTIONS (table 'slamengine_commits');
 CREATE FOREIGN TABLE commits_timestamps
        (ts timestamp OPTIONS (map 'commit.author.date')
+       ,tstz timestamptz OPTIONS (map 'commit.author.date')
        ,sha varchar)
        SERVER quasar OPTIONS (table 'slamengine_commits_dates');
 CREATE FOREIGN TABLE olympics

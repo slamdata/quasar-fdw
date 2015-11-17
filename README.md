@@ -176,6 +176,9 @@ If [quasar](https://github.com/quasar-analytics/quasar) adds operators, it would
   - inside `quasar_has_function` function
   - add the new function to the big `if` statement
   - if the function needs to be transformed, do it inside the `if`.
+- Quasar (as of 2.2.3) doesn't have support for some constants such as intervals with years and months, or NaN
+    - Because PostgreSQL supports these constants, they must be filtered outer
+    - This can be changed in the `quasar_has_const` function
 
 ## Legal
 

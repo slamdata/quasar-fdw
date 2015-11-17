@@ -53,3 +53,7 @@ EXPLAIN (COSTS off) SELECT * FROM commits_timestamps WHERE ts < DATE '2015-01-20
 EXPLAIN (COSTS off) SELECT * FROM commits_timestamps WHERE tstz < TIMESTAMPTZ '2015-01-15 19:43:04 PST';
 EXPLAIN (COSTS off) SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;
 EXPLAIN (COSTS off) SELECT * FROM test_times WHERE t < TIME '11:04:23.551';
+/* Intervals less than 1 month are pushed down to quasar */
+EXPLAIN (COSTS off) SELECT * FROM test_intervals WHERE i < INTERVAL '7 days 4 hours 5 minutes';
+/* Intervals > 1 month can't be pushed down because quasar doesn't handle them */
+EXPLAIN (COSTS off) SELECT * FROM test_intervals WHERE i > INTERVAL '1 year';

@@ -204,23 +204,31 @@ SELECT * FROM zips ORDER BY length(city), -pop, state LIMIT 10;
 
 /* Date pushdown and ordering */
 SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIMIT 2;
-            ts            |                   sha                    
---------------------------+------------------------------------------
- Mon Jan 19 19:15:53 2015 | 0999da94bddcbc5bf536e3874aaba50582e96959
- Sat Jan 17 21:45:28 2015 | 472dd80e8bdffae0c1bded28a91139941433550d
+            ts            |             tstz             |                   sha                    
+--------------------------+------------------------------+------------------------------------------
+ Mon Jan 19 19:15:53 2015 | Mon Jan 19 11:15:53 2015 PST | 0999da94bddcbc5bf536e3874aaba50582e96959
+ Sat Jan 17 21:45:28 2015 | Sat Jan 17 13:45:28 2015 PST | 472dd80e8bdffae0c1bded28a91139941433550d
 (2 rows)
 
 SELECT * FROM commits_timestamps WHERE ts < DATE '2015-01-20' LIMIT 2;
-            ts            |                   sha                    
---------------------------+------------------------------------------
- Mon Jan 19 19:15:53 2015 | 0999da94bddcbc5bf536e3874aaba50582e96959
- Sat Jan 17 21:45:28 2015 | 472dd80e8bdffae0c1bded28a91139941433550d
+            ts            |             tstz             |                   sha                    
+--------------------------+------------------------------+------------------------------------------
+ Mon Jan 19 19:15:53 2015 | Mon Jan 19 11:15:53 2015 PST | 0999da94bddcbc5bf536e3874aaba50582e96959
+ Sat Jan 17 21:45:28 2015 | Sat Jan 17 13:45:28 2015 PST | 472dd80e8bdffae0c1bded28a91139941433550d
 (2 rows)
 
+SELECT * FROM commits_timestamps WHERE tstz < TIMESTAMPTZ '2015-01-15 19:43:04 PST';
+            ts            |             tstz             |                   sha                    
+--------------------------+------------------------------+------------------------------------------
+ Thu Jan 15 20:43:04 2015 | Thu Jan 15 12:43:04 2015 PST | 3de46760d45c4fd0db9a03ad978361df3e8f0998
+ Wed Jan 14 23:10:11 2015 | Wed Jan 14 15:10:11 2015 PST | 43b4018ae5d1e40bbbc2babb8929ed247b5d2dcb
+ Fri Jan 16 02:08:26 2015 | Thu Jan 15 18:08:26 2015 PST | 6a23a4c8809635828bbdeea145894287348c9bd5
+(3 rows)
+
 SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;
-            ts            |                   sha                    
---------------------------+------------------------------------------
- Thu Jan 29 15:52:37 2015 | b8a2302e6a0659875d03bfe4988c000f2ed027a0
- Thu Jan 29 00:23:14 2015 | 18164870e8803e5885a88f8dfd53b82c80721503
+            ts            |             tstz             |                   sha                    
+--------------------------+------------------------------+------------------------------------------
+ Thu Jan 29 15:52:37 2015 | Thu Jan 29 07:52:37 2015 PST | b8a2302e6a0659875d03bfe4988c000f2ed027a0
+ Thu Jan 29 00:23:14 2015 | Wed Jan 28 16:23:14 2015 PST | 18164870e8803e5885a88f8dfd53b82c80721503
 (2 rows)
 
