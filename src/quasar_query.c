@@ -183,7 +183,8 @@ is_foreign_expr(PlannerInfo *root,
                           || (x) == FLOAT4OID || (x) == FLOAT8OID       \
                           || (x) == NUMERICOID || (x) == DATEOID        \
                           || (x) == TIMEOID || (x) == TIMESTAMPOID      \
-                          || (x) == INTERVALOID || (x) == BOOLOID)
+                          || (x) == INTERVALOID || (x) == BOOLOID       \
+                          || (x) == TIMESTAMPTZOID || (x) == TIMETZOID)
 #define checkType(type) if (!canHandleType((type))) return false
 #define checkCollation(collid) if (collid != InvalidOid &&              \
                                    collid != DEFAULT_COLLATION_OID) return false
@@ -1528,6 +1529,11 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
         else
             appendStringInfoString(buf, "false");
         break;
+    case TIMEOID:
+    {
+        appendStringInfo(buf, "(TIME '%s')", svalue);
+    }
+    break;
     case DATEOID:
     {
         struct pg_tm tm;
@@ -1555,6 +1561,15 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
         appendStringInfo(buf, "(TIMESTAMP '%04d-%02d-%02dT%02d:%02d:%02dZ')",
                          tm.tm_year, tm.tm_mon, tm.tm_mday,
                          tm.tm_hour, tm.tm_min, tm.tm_sec);
+    }
+    break;
+    case TIMESTAMPTZOID:
+    {
+        pg_time_t tt = timestamptz_to_time_t(DatumGetTimestampTz(value));
+        struct pg_tm *tm = pg_gmtime(&tt);
+        appendStringInfo(buf, "(TIMESTAMP '%04d-%02d-%02dT%02d:%02d:%02dZ')",
+                         tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                         tm->tm_hour, tm->tm_min, tm->tm_sec);
     }
     break;
     case INTERVALOID:

@@ -236,3 +236,10 @@ EXPLAIN (COSTS off) SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;
          Quasar query: SELECT "commit"."author"."date" AS "ts", "sha" FROM "slamengine_commits_dates" ORDER BY "commit"."author"."date" DESC
 (3 rows)
 
+EXPLAIN (COSTS off) SELECT * FROM test_times WHERE t < TIME '11:04:23.551';
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Foreign Scan on test_times
+   Quasar query: SELECT "t" FROM "testtime_doesnt_exist" WHERE (("t" < (TIME '11:04:23.551')))
+(2 rows)
+

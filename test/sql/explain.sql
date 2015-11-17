@@ -50,4 +50,6 @@ EXPLAIN (VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY pop DESC;
 /* Timestamps and dates pushdown */
 EXPLAIN (COSTS off) SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIMIT 2;
 EXPLAIN (COSTS off) SELECT * FROM commits_timestamps WHERE ts < DATE '2015-01-20' LIMIT 2;
+EXPLAIN (COSTS off) SELECT * FROM commits_timestamps WHERE ts < TIMESTAMPTZ '2015-01-15 19:43:04 PST';
 EXPLAIN (COSTS off) SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;
+EXPLAIN (COSTS off) SELECT * FROM test_times WHERE t < TIME '11:04:23.551';
