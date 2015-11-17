@@ -2,9 +2,9 @@
  *
  * Quasar Foreign Data Wrapper for PostgreSQL
  *
- * Copyright (c) 2015 SlamData
+ * Copyright (c) 2015 SlamData Inc
  *
- * This software is released under the PostgreSQL Licence
+ * This software is released under the Apache 2 license
  *
  * Author: Jon Eisen <jon@joneisen.works>
  *
@@ -55,6 +55,10 @@ QuasarGetConnection(ForeignServer *server)
 {
     ListCell *lc;
     QuasarConn *conn = palloc0(sizeof(QuasarConn));
+
+    conn->server = DEFAULT_SERVER;
+    conn->path = DEFAULT_PATH;
+    conn->timeout_ms = DEFAULT_TIMEOUT_MS;
 
     foreach(lc, server->options)
     {

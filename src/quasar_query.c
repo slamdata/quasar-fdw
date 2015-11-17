@@ -4,7 +4,7 @@
  *
  * Copyright (c) 2015 SlamData
  *
- * This software is released under the PostgreSQL Licence
+ * This software is released under the Apache 2 license
  *
  * Author: Jon Eisen <jon@joneisen.works>
  *

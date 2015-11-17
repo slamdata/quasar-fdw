@@ -5,7 +5,7 @@
 #
 # Copyright (c) 2015 SlamData
 #
-# This software is released under the PostgreSQL Licence
+# This software is released under the Apache 2 License
 #
 # Author: Jon Eisen <jon@joneisen.works>
 #
@@ -36,8 +36,8 @@ DEBIAN_POSTGRES_PACKAGE=
 CENTOS_POSTGRES_PACKAGE=
 
 ## User-customizable variables
-FDWVERSION=${FDWVERSION:-master}
-YAJLVERSION=${YAJLBRANCH:-yajl_reset}
+FDWVERSION=${FDWVERSION:-v0.1}
+YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar_fdw}
 
 ##

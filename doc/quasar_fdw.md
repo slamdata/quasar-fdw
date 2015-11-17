@@ -1,18 +1,27 @@
 # Quasar Foreign Data Wrapper for PostgreSQL
 
-This skeleton FDW simply throws away any data it receives. Updates and deletes
-are no-ops, since there is no data to update or delete. Selecting data from it 
-returns an empty resultset, of course.
+This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analytics/quasar).
 
-This code as partly written as a bit of fun for pgCon 2013, and partly so there
-would be a skeleton FDW that could be used as the basis for creating another
-FDW. Simply take this code, globally replace the word "quasar" (preserving
-case) with your FDW's prefix and you will have a new functional FDW you can
-start adding data handling features to.
+The main advantage of using this FDW over alternatives is that it takes full advantage of the Quasar query engine by "pushing down" as many clauses from the PostgreSQL query to Quasar as possible. This includes WHERE, ORDER BY, and JOIN clauses.
 
-The code includes the new new data modifying stuff as well as the pre-9.3 data
-scanning functionality.
+## Options
 
-The comments in the functions come from the draft 9.3 docs as at the time of
-writing (May 26 2013). That saves you from having to go back and forth
-between the docs and the code.
+The following parameters can be set on a Quasar foreign server object:
+
+- `server`: URL of remote Quasar Server. Defaults to `http://localhost:8080`
+- `path`: Path to the test data on remote Quasar. Defaults to `/test`
+- `timeout_ms`: Timeout in milliseconds of querying data from Quasar. Defaults to `1000` (1s)
+- `use_remote_estimate`: Boolean (`true` or `false`) to allow quasar_fdw to contact Quasar with rowcounts to estimate cost of queries. Defaults to `true`
+- `fdw_startup_cost`: Cost (floating-point) of starting up a query to Quasar. Defaults to `100.0`
+- `fdw_tuple_cost`: Cost (floating-point) of processing a tuple in quasar_fdw. Defaults to `0.01`
+
+The following parameters can be set on a Quasar foreign table object:
+
+- `table`: Name of the Quasar table / mongo collection to query. Required.
+- `use_remote_estimate`: Boolean (`true` or `false`) to override the server-level option. Defaults to server's value.
+
+The following parameters can be set on a column in a Quasar foreign table:
+
+- `map`: The name of the column to query in Quasar. Defaults to the lowercase name of the column in PostgreSQL.
+- `nopushdown`: Boolean (`true` or `false`) value telling quasar_fdw not to push down any comparison clauses with this column in it. Used when underlying data is not stored as the correct type. Defaults to `false`
+- `join_rowcount_estimate`: Integer value representing the "distinctness" of a columns value in the underlying data. This will be used to estimate the number of rows that might be queried from a single value. For columns with unique values, this should be `1`. Only used in join clauses. Defaults to `1`.

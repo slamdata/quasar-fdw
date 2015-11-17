@@ -2,11 +2,11 @@
  *
  * Quasar Foreign Data Wrapper for PostgreSQL
  *
- * Copyright (c) 2013 Andrew Dunstan
+ * Copyright (c) 2015 SlamData Inc
  *
- * This software is released under the PostgreSQL Licence
+ * This software is released under the Apache 2 License
  *
- * Author: Andrew Dunstan <andrew@dunslane.net>
+ * Author: Jon Eisen <jon@joneisen.works>
  *
  * IDENTIFICATION
  *            quasar_fdw/src/quasar_fdw.c
@@ -292,7 +292,7 @@ quasarGetForeignRelSize(PlannerInfo *root,
      * Extract user-settable option values.  Note that per-table setting of
      * use_remote_estimate overrides per-server setting.
      */
-    fpinfo->use_remote_estimate = false;
+    fpinfo->use_remote_estimate = DEFAULT_FDW_USE_REMOTE_ESTIMATE;
     fpinfo->fdw_startup_cost = DEFAULT_FDW_STARTUP_COST;
     fpinfo->fdw_tuple_cost = DEFAULT_FDW_TUPLE_COST;
     fpinfo->shippable_extensions = NIL;

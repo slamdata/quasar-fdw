@@ -2,9 +2,9 @@
  *
  * Quasar Foreign Data Wrapper for PostgreSQL
  *
- * Copyright (c) 2015 SlamData
+ * Copyright (c) 2015 SlamData Inc
  *
- * This software is released under the PostgreSQL Licence
+ * This software is released under the Apache 2 License
  *
  * Author: Jon Eisen <jon@joneisen.works>
  *
@@ -45,9 +45,6 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/planmain.h"
-
-#define DEFAULT_SERVER "http://localhost:8080"
-#define DEFAULT_PATH "/test"
 
 /*
  * Describes the valid options for objects that use this wrapper.
