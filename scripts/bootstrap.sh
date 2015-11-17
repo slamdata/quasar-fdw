@@ -46,14 +46,15 @@ FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar_fdw}
 
 function install()
 {
+    log "Installing for OS $OS"
     make_tempdir
     mypushd $DIR
-    $OS_ensure_requrements
+    ensure_requirements
     test_current_postgres_install
-    if [[ "$TODO_PG_INSTALL" == "1" || "$TODO_PG_UPDATE" == "0" ]]; then
-        $OS_install_postgres
+    if [[ "$TODO_PG_INSTALL" == "1" ]] || [[ "$TODO_PG_UPDATE" == "0" ]]; then
+        install_postgres
     fi
-    $OS_install_builddeps
+    install_builddeps
     install_yajl
     install_fdw
     mypopd
@@ -120,30 +121,45 @@ function cleanup()
 ## OSX Installation functions
 ##
 
-function osx_ensure_requirements()
+function ensure_requirements()
 {
-    if [[ -z $(which brew) ]]; then
-        error "Homebrew is required to use this script on OSX"
-    fi
+    case $OS in
+        osx)
+            if [[ -z $(which brew) ]]; then
+                error "Homebrew is required to use this script on OSX"
+            fi
+            ;;
+        *)
+            ;;
+    esac
 }
 
-function osx_install_builddeps()
+function install_builddeps()
 {
-    brew install git make cmake libcurl \
-         error "Couldn't install build dependencies"
+    case $OS in
+        osx)
+            (logx brew install git make cmake) \
+                 || error "Couldn't install build dependencies"
+            ;;
+        *)
+            ;;
+    esac
 }
 
-function osx_install_postgres()
+function install_postgres()
 {
-    if [[ ! -z $PG_UPDATE ]]; then
-        (logx brew unlink $OSX_POSTGRES_PACKAGE) \
-             || error "Couldn't unlink old postgres install"
-    fi
-    (logx brew install $OSX_POSTGRES_PACKAGE) \
-         || error "Couldn't install postgres package $OSX_POSTGRES_PACKAGE"
-
-    (logx brew link $OSX_POSTGRES_PACKAGE) \
-         || error "Couldn't link postgres package"
+    case $OS in
+        osx)
+            if [[ "$TODO_PG_UPDATE" == "1" ]]; then
+                (logx brew unlink $OSX_POSTGRES_PACKAGE) \
+                    || error "Couldn't unlink old postgres install"
+            fi
+            (logx brew install $OSX_POSTGRES_PACKAGE) \
+                || error "Couldn't install postgres package $OSX_POSTGRES_PACKAGE"
+            ;;
+        *)
+            ;;
+    esac
 }
 
 ##
