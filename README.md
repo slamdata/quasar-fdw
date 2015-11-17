@@ -150,7 +150,7 @@ You'll need make and a full install of PostgreSQL 9.4, as well as [yajl](https:/
 Setup:
 
 1. Start mongodb
-2. Import test data (`QUASAR_DIR=../quasar make import-test-data`)
+2. Import test data (`QUASAR_DIR=../quasar make import-test-data`). Make sure you run this command because extra test data (over the default set) is imported for date testing.
 3. Start Quasar (`QUASAR_DIR=../quasar make build-quasar start-quasar`)
 4. Start Postgres (`postgres -D /usr/local/var/postgres -d 1`)
 
