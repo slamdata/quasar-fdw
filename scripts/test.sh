@@ -22,7 +22,7 @@ POSTGRES_OPTS=
 DB=test_quasar_fdw
 QUASAR_DIR="$(dirname $BASH_SOURCE)/.."
 TEST_DIR="$QUASAR_DIR/test"
-FDW_VERSION=0.1
+FDW_VERSION=$(cat quasar_fdw.control  | grep version | cut -d'=' -f2 | xargs)
 
 
 function error()
