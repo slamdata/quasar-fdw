@@ -250,3 +250,20 @@ EXPLAIN (COSTS off) SELECT * FROM test_times WHERE t < TIME '11:04:23.551';
    Quasar query: SELECT "t" FROM "testtime_doesnt_exist" WHERE (("t" < (TIME '11:04:23.551')))
 (2 rows)
 
+/* Intervals less than 1 month are pushed down to quasar */
+EXPLAIN (COSTS off) SELECT * FROM test_intervals WHERE i < INTERVAL '7 days 4 hours 5 minutes';
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Foreign Scan on test_intervals
+   Quasar query: SELECT "i" FROM "testintervals_doesnt_exist" WHERE (("i" < (INTERVAL 'P7DT4H5M0S')))
+(2 rows)
+
+/* Intervals > 1 month can't be pushed down because quasar doesn't handle them */
+EXPLAIN (COSTS off) SELECT * FROM test_intervals WHERE i > INTERVAL '1 year';
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Foreign Scan on test_intervals
+   Filter: (i > '@ 1 year'::interval)
+   Quasar query: SELECT "i" FROM "testintervals_doesnt_exist"
+(3 rows)
+
