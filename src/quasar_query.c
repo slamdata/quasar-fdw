@@ -184,7 +184,7 @@ is_foreign_expr(PlannerInfo *root,
                           || (x) == NUMERICOID || (x) == DATEOID        \
                           || (x) == TIMEOID || (x) == TIMESTAMPOID      \
                           || (x) == INTERVALOID || (x) == BOOLOID       \
-                          || (x) == TIMESTAMPTZOID || (x) == TIMETZOID)
+                          || (x) == TIMESTAMPTZOID)
 #define checkType(type) if (!canHandleType((type))) return false
 #define checkCollation(collid) if (collid != InvalidOid &&              \
                                    collid != DEFAULT_COLLATION_OID) return false

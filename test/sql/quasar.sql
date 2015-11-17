@@ -49,5 +49,5 @@ SELECT * FROM zips ORDER BY length(city), -pop, state LIMIT 10;
 /* Date pushdown and ordering */
 SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIMIT 2;
 SELECT * FROM commits_timestamps WHERE ts < DATE '2015-01-20' LIMIT 2;
-SELECT * FROM commits_timestamps WHERE ts < TIMESTAMPTZ '2015-01-15 19:43:04 PST';
+SELECT * FROM commits_timestamps WHERE tstz < TIMESTAMPTZ '2015-01-15 19:43:04 PST';
 SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;
