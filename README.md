@@ -133,6 +133,14 @@ EXPLAIN (COSTS off) SELECT * FROM zips LIMIT 10;
 EXPLAIN (COSTS off, VERBOSE on) SELECT * FROM zips LIMIT 10;
 ```
 
+### Supported Types
+
+- string types: char, text, varchar, bpchar, name
+- number types: numeric, int4, int8, int2, float4, float8, numeric, oid
+- time types: time, timestamp, date, timestamptz, date
+- bool
+- complexy types: arrays, json, jsonb
+
 ### Gotchyas
 
 - Postgres will downcase all field names, so if a field has a capital letter in it, you must use the map option: `OPTIONS (map "camelCaseSensitive")`
