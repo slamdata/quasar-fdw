@@ -15,51 +15,114 @@
 # Cross-platform testing using docker
 #
 #-------------------------------------------------------------------------
-BUILD=0
+set -e
 
-function ensure_requirements()
+NO_LOCAL=
+NO_DOCKER=
+FORCE_BUILD=
+PIDS=()
+DOCKER_NS=quasar_fdw_test
+DOCKER_TESTS=(ubuntu-trusty ubuntu-wily debian-jessie)
+
+function testmsg()
+{
+    echo "***********************************************"
+    echo "***********     $1"
+    echo "***********************************************"
+}
+
+function ensure_docker_requirements()
 {
     docker ps >/dev/null || error "Couldn't contact docker host"
+    make clean
 }
 
-function build()
+function build_docker()
 {
-    if [[ "$BUILD" == "1" ]]; then
-        docker build -f docker/mongodb.dockerfile -t local/mongodb .
-        docker build -f docker/quasar.dockerfile -t local/quasar .
-
-        docker build -f docker/ubuntu-trusty.dockerfile \
-               -t local/quasar_fdw:ubuntu-trusty .
+    if [[ ! -z $FORCE_BUILD ]] || [[ -z $(docker images | grep $DOCKER_NS/mongodb) ]]; then
+        docker build -f docker/mongodb.dockerfile -t $DOCKER_NS/mongodb .
     fi
-}
-
-function setup()
-{
-    if [[ -z $(docker images | grep local/quasar_fdw) ]]; then
-        error "No images found. Try running $0 --build"
+    if [[ ! -z $FORCE_BUILD ]] || [[ -z $(docker images | grep $DOCKER_NS/quasar) ]]; then
+        docker build -f docker/quasar.dockerfile -t $DOCKER_NS/quasar .
     fi
-    docker run -d --name quasar-test-mongodb local/mongodb
-    docker run -d --name quasar-test-quasar \
-           --link quasar-test-mongodb:mongodb local/quasar
+
+    for test in ${DOCKER_TESTS[@]}; do
+        if [[ ! -z $FORCE_BUILD ]] || [[ -z $(docker images | grep $DOCKER_NS/quasar_fdw | grep $test) ]]; then
+            echo "BUILDING $test"
+            docker build -f docker/$test.dockerfile \
+                   -t $DOCKER_NS/quasar_fdw:$test .
+        fi
+    done
 }
 
-function run()
+function setup_docker()
 {
-    docker run --rm \
-           --link quasar-test-quasar:quasar \
-           --env QUASAR_SERVER=quasar \
-           --env QUASAR_PATH=/test/quasar \
-           --env QUASAR_PORT=8080 \
-           -v $(pwd)/test:/app/quasar_fdw/test \
-           local/quasar_fdw:ubuntu-trusty
+    build_docker
+    echo "Starting mongo and quasar docker containers"
+    docker run -d --name $DOCKER_NS-mongodb $DOCKER_NS/mongodb
+    sleep 1
+    docker run -d --name $DOCKER_NS-quasar \
+           --link $DOCKER_NS-mongodb:mongodb $DOCKER_NS/quasar
+    sleep 20
 }
 
-function teardown()
+function teardown_docker()
 {
-    docker stop quasar-test-mongodb
-    docker stop quasar-test-quasar
-    docker rm quasar-test-mongodb
-    docker rm quasar-test-quasar
+    docker stop $DOCKER_NS-mongodb 2>/dev/null || echo "" > /dev/null
+    docker stop $DOCKER_NS-quasar 2>/dev/null || echo "" > /dev/null
+    docker rm $DOCKER_NS-mongodb 2>/dev/null || echo "" > /dev/null
+    docker rm $DOCKER_NS-quasar 2>/dev/null || echo "" > /dev/null
+}
+
+function run_docker()
+{
+    ensure_docker_requirements
+    teardown_docker
+    setup_docker
+    for test in ${DOCKER_TESTS[@]}; do
+        echo "RUNNING TEST $test"
+        docker run -i --rm \
+               --link $DOCKER_NS-quasar:quasar \
+               --env QUASAR_SERVER=quasar \
+               --env QUASAR_PATH=/test/quasar \
+               --env QUASAR_PORT=8080 \
+               -v $(pwd)/test:/app/quasar_fdw/test \
+               $DOCKER_NS/quasar_fdw:$test \
+            && testmsg "TEST $test: SUCCEEDED" \
+            || (testmsg "TEST $test: FAILED" && exit 127)
+    done
+    teardown_docker
+}
+
+function run_local()
+{
+    echo "Ensuring postgres, quasar, and mongodb are started"
+    echo "If these fail, you should start them yourself and re-run."
+    if ! (mongo -eval '1' >/dev/null 2>&1); then
+        echo "Starting temporary mongodb"
+        nohup mongod --config /usr/local/etc/mongod.conf > /tmp/mongodb.log 2>&1 &
+        PIDS+=($!)
+    fi
+    if ! (psql --list >/dev/null 2>&1); then
+        echo "Starting temporary postgresql"
+        nohup postgres -D /usr/local/var/postgres -d 1 > /tmp/postgres.log 2>&1 &
+        PIDS+=($!)
+    fi
+    if ! (curl http://localhost:8080/query/fs/local/quasar?q=SELECT%20city%20FROM%20zips%20LIMIT%201 >/dev/null 2>&1); then
+        echo "Starting temporary quasar"
+        nohup make start-quasar > /tmp/quasar.log 2>&1 &
+        PIDS+=($!)
+    fi
+
+    sleep 5
+
+    make install installcheck \
+        && testmsg "LOCAL TEST: SUCCEEDED" \
+        || (testmsg "LOCAL TEST: FAILED" && exit 127)
+
+    for pid in ${PIDS[@]}; do
+        kill $pid
+    done
 }
 
 function error()
@@ -70,21 +133,29 @@ function error()
 
 function main()
 {
-    ensure_requirements
-    build
-    setup
-    run
-    teardown
+    if [[ -z $NO_DOCKER ]]; then
+        run_docker
+        testmsg "ALL DOCKER TESTS PASS"
+    fi
+    if [[ -z $NO_LOCAL ]]; then
+        run_local
+    fi
+
+    if [[ -z "${NO_LOCAL}${NO_DOCKER}" ]]; then
+        testmsg "ALL TESTS PASS"
+    fi
 }
 
 function help()
 {
     echo "$0 [options]"
-    echo "Cross-platform testing for quasar_fdw using docker"
+    echo "Cross-platform testing for quasar_fdw locally and using docker"
     echo ""
     echo "Options:"
     echo " -h|--help          Show this message"
-    echo " -b|--build         Build docker containers"
+    echo " -l|--local-only    Only test locally"
+    echo " -d|--docker-only   Only test in docker"
+    echo " -b|--force-build   Forcibly rebuild docker images"
     exit 1
 }
 
@@ -94,8 +165,14 @@ do
         -h|--help)
             help
             ;;
-        -b|--build)
-            BUILD=1
+        -l|--local-only)
+            NO_DOCKER=1
+            ;;
+        -d|--docker-only)
+            NO_LOCAL=1
+            ;;
+        -b|--force-build)
+            FORCE_BUILD=1
             ;;
         *)
             echo "Options $1 not known."
@@ -103,5 +180,7 @@ do
             ;;
     esac
     shift # past argument or value
+
 done
+
 main

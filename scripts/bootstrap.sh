@@ -15,6 +15,7 @@
 # Bootstrapping script for Postgres 9.4 and Quasar FDW
 #
 #-------------------------------------------------------------------------
+set -e
 
 ## Internal variables
 OS=
@@ -73,7 +74,7 @@ function make_tempdir()
 
 function test_current_postgres_install()
 {
-    if [[ -z $(which postgres) ]]; then
+    if [[ -z $(which postgres 2>/dev/null) ]]; then
         log "You do not have PostgreSQL. Installing..."
         TODO_PG_INSTALL=1
     elif ! [[ $(postgres --version) =~ "$POSTGRES_VERSION_REGEX" ]]; then
@@ -133,8 +134,6 @@ function ensure_requirements()
                 error "Homebrew is required to use this script on OSX"
             fi
             ;;
-        debian)
-            ;;
         *)
             ;;
     esac
@@ -149,6 +148,10 @@ function install_builddeps()
             ;;
         debian)
             (logx sudo apt-get install -y git make cmake libcurl4-openssl-dev curl) \
+                || error "Couldn't install build dependencies"
+            ;;
+        centos)
+            (logx sudo yum install -y git make cmake libcurl-devel curl gcc) \
                 || error "Couldn't install build dependencies"
             ;;
         *)
@@ -175,8 +178,7 @@ function install_postgres()
             (logx sudo apt-get install -y wget) \
                 || error "Couldn't install wget"
 
-            . /etc/lsb-release
-            echo "deb http://apt.postgresql.org/pub/repos/apt/ $DISTRIB_CODENAME-pgdg main" \
+            echo "deb http://apt.postgresql.org/pub/repos/apt/ ${OSVERSION}-pgdg main" \
                  > /etc/apt/sources.list.d/pgdg.list
             (logx wget --quiet -O - \
                   https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -187,6 +189,27 @@ function install_postgres()
             (logx sudo apt-get install -y postgresql-9.4 \
                                           postgresql-server-dev-9.4) \
                 || error "Couldn't install postgresql-9.4"
+            ;;
+        centos)
+            case $OSTYPE in
+                fedora)
+                    logx sudo sed 's/\(\[fedora\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora.repo
+                    logx sudo sed 's/\(\[updates\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora-updates.repo
+                    logx sudo rpm -Uvh http://yum.postgresql.org/9.4/fedora/fedora-${OSVERSION}-x86_64/pgdg-fedora94-9.4-4.noarch.rpm
+                    ;;
+                centos)
+                    logx sudo sed 's/\(\[base\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/CentOS-Base.repo
+                    logx sudo sed 's/\(\[updates\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/CentOS-Base.repo
+                    logx sudo rpm -Uvh http://yum.postgresql.org/9.4/redhat/rhel-${OSVERSION}-x86_64/pgdg-centos94-9.4-2.noarch.rpm
+                    ;;
+                rhel)
+                    logx sudo sed 's/\(\[main\]\)/\1\nexclude=postgresql*/' -i /etc/yum/pluginconf.d/rhnplugin.conf
+                    logx sudo sed 's/\(\[main\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora-updates.repo
+                    logx sudo rpm -Uvh http://yum.postgresql.org/9.4/redhat/rhel-${OSVERSION}-x86_64/pgdg-redhat94-9.4-2.noarch.rpm
+                    ;;
+            esac
+
+            logx sudo $YUM install -y postgresql94 postgresql94-server postgresql94-libs
             ;;
         *)
             ;;
@@ -217,10 +240,45 @@ function figure_out_os()
             OS=osx
             ;;
         Linux)
-            if [[ ! -z $(which apt-get) ]]; then
+            if [[ -e /etc/lsb-release ]]; then
+                . /etc/lsb-release
                 OS=debian
-            elif [[ ! -z $(which yum) ]]; then
-                OS=centos
+                OSTYPE=ubuntu
+                OSVERSION=$DISTRIB_CODENAME
+            elif [[ -e /etc/os-release ]]; then
+                . /etc/os-release
+                case $ID in
+                    debian)
+                        OS=debian
+                        OSTYPE=debian
+                        OSVERSION=$(echo $VERSION | cut -d'(' -f2 | cut -d')' -f1)
+                        ;;
+                    fedora)
+                        OS=centos
+                        OSTYPE=fedora
+                        OSVERSION=$VERSION_ID
+                        ;;
+                    rhel)
+                        OS=centos
+                        OSTYPE=rhel
+                        OSVERSION=$VERSION_ID
+                        ;;
+                    centos)
+                        OS=centos
+                        OSTYPE=rhel
+                        OSVERSION=$VERSION_ID
+                        ;;
+                    *)
+                        error "OS $ID is not supported at this time."
+                        ;;
+                esac
+                if [[ -z $(which dnf 2>/dev/null) ]]; then
+                    YUM=yum
+                else
+                    YUM=dnf
+                fi
+            else
+                error "This script doesn't support your OS type."
             fi
             ;;
         *)
@@ -271,8 +329,10 @@ function logx()
     echo "cmd: $@" | tee -a $LOG
     if [[ "$VERBOSE" == "1" ]]; then
         $@ 2>&1 | tee -a $LOG
+        return $?
     else
         $@ >> $LOG 2>&1
+        return $?
     fi
 }
 
