@@ -57,8 +57,8 @@ function test_requirements()
         || error "Could not connect to Quasar. Check options."
 
     # Quasar must have test data in correct path
-    resp=$(curl "${QUASAR_SERVER}/query/fs${QUASAR_PATH}?q=SELECT%20city%20FROM%20smallZips%20LIMIT%201" 2>/dev/null | sed 's/\r$//')
-    exp='{ "city": "BELCHERTOWN" }'
+    resp=$(curl "${QUASAR_SERVER}/query/fs${QUASAR_PATH}?q=SELECT%20city%20FROM%20smallZips%20ORDER%20BY%20city%20LIMIT%201" 2>/dev/null | sed 's/\r$//')
+    exp='{ "city": "ADAMS" }'
 
     if [[ "$resp" != "$exp" ]]; then
         error "The quasar path did not contain the test data set. Check options."

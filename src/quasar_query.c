@@ -211,14 +211,9 @@ static bool
 foreign_expr_walker(Node *node,
                     foreign_glob_cxt *glob_cxt)
 {
-    QuasarFdwRelationInfo *fpinfo;
-
     /* Need do nothing for empty subexpressions */
     if (node == NULL)
         return true;
-
-    /* May need server info from baserel's fdw_private struct */
-    fpinfo = (QuasarFdwRelationInfo *) (glob_cxt->foreignrel->fdw_private);
 
     switch (nodeTag(node))
     {
@@ -518,7 +513,7 @@ bool quasar_has_const(Const *node) {
  * Quasar name may be different from PG name
  */
 bool quasar_has_op(OpExpr *oper, char **name, char *opkind, bool *asfunc) {
-    Oid schema, leftargtype, rightargtype;
+    Oid schema, rightargtype;
     char *opername, oprkind;
 
     /* get operator name, kind, argument type and schema */
@@ -530,7 +525,6 @@ bool quasar_has_op(OpExpr *oper, char **name, char *opkind, bool *asfunc) {
     opername = pstrdup(((Form_pg_operator)GETSTRUCT(tuple))->oprname.data);
     oprkind = ((Form_pg_operator)GETSTRUCT(tuple))->oprkind;
     schema = ((Form_pg_operator)GETSTRUCT(tuple))->oprnamespace;
-    leftargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprleft;
     rightargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprright;
     ReleaseSysCache(tuple);
 
@@ -608,7 +602,7 @@ bool quasar_has_op(OpExpr *oper, char **name, char *opkind, bool *asfunc) {
  */
 bool quasar_has_scalar_array_op(ScalarArrayOpExpr *arrayoper, char **name) {
     char *opername;
-    Oid leftargtype, schema;
+    Oid schema;
     HeapTuple tuple;
 
     /* get operator name, left argument type and schema */
@@ -618,7 +612,6 @@ bool quasar_has_scalar_array_op(ScalarArrayOpExpr *arrayoper, char **name) {
         elog(ERROR, "cache lookup failed for operator %u", arrayoper->opno);
     }
     opername = pstrdup(((Form_pg_operator)GETSTRUCT(tuple))->oprname.data);
-    leftargtype = ((Form_pg_operator)GETSTRUCT(tuple))->oprleft;
     schema = ((Form_pg_operator)GETSTRUCT(tuple))->oprnamespace;
     ReleaseSysCache(tuple);
 

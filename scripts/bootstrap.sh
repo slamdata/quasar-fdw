@@ -28,17 +28,16 @@ MONGOPID=
 QUASARPID=
 NOTEST=
 FN=$(basename $0)
+VERBOSE=0
+NO_FDW=
 
 ## Configuration
 POSTGRES_VERSION_REGEX=9.4
-OSX_POSTGRES_PACKAGE=postgresql
-DEBIAN_POSTGRES_PACKAGE=
-CENTOS_POSTGRES_PACKAGE=
 
 ## User-customizable variables
 FDWVERSION=${FDWVERSION:-v0.2.1}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
-FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar_fdw}
+FDWCLONEURL=${FDWCLONEURL:-https://github.com/yanatan16/quasar_fdw}
 
 ##
 ## Platform agnostic installation functions
@@ -56,7 +55,9 @@ function install()
     fi
     install_builddeps
     install_yajl
-    install_fdw
+    if [[ -z $NO_FDW ]]; then
+        install_fdw
+    fi
     mypopd
     cleanup
     log "Install is successful!"
@@ -86,12 +87,12 @@ function test_current_postgres_install()
 function install_fdw()
 {
     log "Installing Quasar FDW version $FDWVERSION"
-    (logxs git clone $FDWCLONEURL "fdw_$FDWVERSION") \
+    (logx git clone $FDWCLONEURL "fdw_$FDWVERSION") \
          || error "Clone of FDW respoitory failed"
     mypushd "fdw_$FDWVERSION"
-    (logxs git checkout $FDWVERSION) \
+    (logx git checkout $FDWVERSION) \
         || error "Couldn't find Quasar FDW version $FDWVERSION"
-    (logxs make install) \
+    (logx make install) \
         || error "Error installing Quasar FDW"
     mypopd
 }
@@ -99,15 +100,18 @@ function install_fdw()
 function install_yajl()
 {
     log "Installing yajl version $YAJLVERSION"
-    (logxs git clone https://github.com/lloyd/yajl "yajl_$YAJLVERSION") \
+    (logx git clone https://github.com/lloyd/yajl "yajl_$YAJLVERSION") \
          || error "Clone of YAJL repository failed"
     mypushd "yajl_$YAJLVERSION"
-    (logxs git checkout $YAJLVERSION) \
+    (logx git checkout $YAJLVERSION) \
          || error "Couldn't find yajl version $YAJLVERSION"
-    (logxs ./configure) \
+    (logx ./configure) \
         || error "Configuration of YAJL failed"
-    (logxs make clean install) \
+    (logx make clean install) \
         || error "Installation of YAJL failed"
+    if [[ -z $LD_LIBRARY_PATH ]]; then
+        mv /usr/local/lib/libyajl* /usr/lib/
+    fi
     mypopd
 }
 
@@ -129,6 +133,8 @@ function ensure_requirements()
                 error "Homebrew is required to use this script on OSX"
             fi
             ;;
+        debian)
+            ;;
         *)
             ;;
     esac
@@ -141,6 +147,10 @@ function install_builddeps()
             (logx brew install git make cmake) \
                  || error "Couldn't install build dependencies"
             ;;
+        debian)
+            (logx sudo apt-get install -y git make cmake libcurl4-openssl-dev curl) \
+                || error "Couldn't install build dependencies"
+            ;;
         *)
             ;;
     esac
@@ -151,11 +161,32 @@ function install_postgres()
     case $OS in
         osx)
             if [[ "$TODO_PG_UPDATE" == "1" ]]; then
-                (logx brew unlink $OSX_POSTGRES_PACKAGE) \
+                (logx brew unlink postgresql) \
                     || error "Couldn't unlink old postgres install"
             fi
-            (logx brew install $OSX_POSTGRES_PACKAGE) \
+            (logx brew install postgresql) \
                 || error "Couldn't install postgres package $OSX_POSTGRES_PACKAGE"
+            ;;
+        debian)
+            if [[ "$TODO_PG_UPDATE" == "1" ]]; then
+                (logx sudo apt-get uninstall -y postgresql)
+            fi
+
+            (logx sudo apt-get install -y wget) \
+                || error "Couldn't install wget"
+
+            . /etc/lsb-release
+            echo "deb http://apt.postgresql.org/pub/repos/apt/ $DISTRIB_CODENAME-pgdg main" \
+                 > /etc/apt/sources.list.d/pgdg.list
+            (logx wget --quiet -O - \
+                  https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+                  | sudo apt-key add -) \
+                || error "Couldn't get postgresql repo signing key"
+            logx sudo apt-get update
+
+            (logx sudo apt-get install -y postgresql-9.4 \
+                                          postgresql-server-dev-9.4) \
+                || error "Couldn't install postgresql-9.4"
             ;;
         *)
             ;;
@@ -201,9 +232,13 @@ function figure_out_os()
 
 function help()
 {
-    echo "$0"
+    echo "$0 [options]"
     echo ""
     echo " Bootstrap Quasar FDW and PostgreSQL"
+    echo "Options:"
+    echo " -h|--help                Show this message"
+    echo " -v|--verboase            Print a lot of stuff"
+    echo " -r|--requirements-only   Don't install the FDW itself"
     echo "Env Vars:"
     echo " FDWVERSION:  Quasar FDW Git Reference (Default: master)"
     echo " YAJLVERSION: Yajl Git Reference (Default: yajl_reset)"
@@ -233,15 +268,12 @@ function log()
 # Execute a command and log output
 function logx()
 {
-    echo "cmd: $@" >> $LOG
-    $@ 2>&1 | tee -a $LOG
-}
-
-# Execute a command and log output but not to console
-function logxs()
-{
-    echo "cmd: $@" >> $LOG
-    $@ >> $LOG 2>&1
+    echo "cmd: $@" | tee -a $LOG
+    if [[ "$VERBOSE" == "1" ]]; then
+        $@ 2>&1 | tee -a $LOG
+    else
+        $@ >> $LOG 2>&1
+    fi
 }
 
 DIRLEVELS=0
@@ -264,15 +296,25 @@ function mypopdall()
     done
 }
 
-case "$1" in
-    -h|--help)
-        help
-        ;;
-    "")
-        ;;
-    *)
-        error "Unknown option. Try --help"
-        ;;
-esac
+while [[ $# > 0 ]]
+do
+    case "$1" in
+        -h|--help)
+            help
+            ;;
+        -v|--verbose)
+            VERBOSE=1
+            ;;
+        -r|--requirements-only)
+            NO_FDW=1
+            ;;
+        "")
+            ;;
+        *)
+            error "Unknown option. Try --help"
+            ;;
+    esac
+    shift
+done
 
 main

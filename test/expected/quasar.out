@@ -1,26 +1,26 @@
 /* Select */
 /* Basic selection with limit */
-SELECT * FROM smallzips LIMIT 3;
-    city     |  pop  | state 
--------------+-------+-------
- BELCHERTOWN | 10579 | MA
- BARRE       |  4546 | MA
- AGAWAM      | 15338 | MA
+SELECT * FROM smallzips ORDER BY city LIMIT 3;
+   city   |  pop  | state 
+----------+-------+-------
+ ADAMS    |  9901 | MA
+ AGAWAM   | 15338 | MA
+ ASHFIELD |  1535 | MA
 (3 rows)
 
 /* Select less fields than exist */
-SELECT city FROM smallzips LIMIT 1;
-    city     
--------------
- BELCHERTOWN
+SELECT city FROM smallzips ORDER BY city LIMIT 1;
+ city  
+-------
+ ADAMS
 (1 row)
 
 /* Basic WHERE clause */
-SELECT * FROM zips WHERE "state" = 'CO' LIMIT 2;
-  city  |  pop  | state 
---------+-------+-------
- ARVADA | 12065 | CO
- ARVADA | 32980 | CO
+SELECT * FROM zips WHERE "state" = 'CO' ORDER BY city LIMIT 2;
+  city   | pop | state 
+---------+-----+-------
+ AGATE   | 230 | CO
+ AGUILAR | 928 | CO
 (2 rows)
 
 /* Nested selection */
@@ -31,60 +31,58 @@ SELECT * FROM nested LIMIT 1;
 (1 row)
 
 /* less fields than in relation, with one in a WHERE clause */
-SELECT city FROM zips WHERE "state" = 'CO' LIMIT 1;
-  city  
---------
- ARVADA
+SELECT city FROM zips WHERE "state" = 'CO' ORDER BY city LIMIT 1;
+ city  
+-------
+ AGATE
 (1 row)
 
-SELECT city,pop FROM smallzips WHERE pop % 2 = 1 LIMIT 3;
-     city     |  pop  
---------------+-------
- BELCHERTOWN  | 10579
- CUSHMAN      | 36963
- CHESTERFIELD |   177
+SELECT city,pop FROM smallzips WHERE pop % 2 = 1 ORDER BY city LIMIT 3;
+     city     | pop  
+--------------+------
+ ADAMS        | 9901
+ ASHFIELD     | 1535
+ ASHLEY FALLS |  561
 (3 rows)
 
 /* Test out array usage */
-SELECT * FROM zipsloc LIMIT 2;
+SELECT * FROM zipsloc ORDER BY loc[1] LIMIT 2;
           loc           
 ------------------------
- {-72.410953,42.275103}
- {-72.108354,42.409698}
+ {-72.5676,42.050658}
+ {-72.770588,42.051099}
 (2 rows)
 
 /* Test out json usage */
-SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson LIMIT 2;
-    loc0    |   loc1    |          locb           
-------------+-----------+-------------------------
- -72.410953 | 42.275103 | [-72.410953, 42.275103]
- -72.108354 | 42.409698 | [-72.108354, 42.409698]
-(2 rows)
-
+SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson ORDER BY loc->0 LIMIT 2;
+ERROR:  could not identify an ordering operator for type json
+LINE 2: ...oc0, locb->1 AS loc1, locb FROM zipsjson ORDER BY loc->0 LIM...
+                                                             ^
+HINT:  Use an explicit ordering operator or modify the query.
 /* Pushdown regex operators */
-SELECT * FROM zips WHERE "state" LIKE 'A%' LIMIT 3;
+SELECT * FROM zips WHERE "state" LIKE 'A%' ORDER BY city LIMIT 3;
     city    |  pop  | state 
 ------------+-------+-------
- ADAMSVILLE | 10616 | AL
+ ABBEVILLE  |  5416 | AL
  ACMAR      |  6055 | AL
- ADGER      |  3205 | AL
+ ADAMSVILLE | 10616 | AL
 (3 rows)
 
-SELECT * FROM smallzips WHERE "city" !~~ 'B%' LIMIT 3;
-  city   |  pop  | state 
----------+-------+-------
- AGAWAM  | 15338 | MA
- CUSHMAN | 36963 | MA
- CHESTER |  1688 | MA
+SELECT * FROM smallzips WHERE "city" !~~ 'B%' ORDER BY city LIMIT 3;
+   city   |  pop  | state 
+----------+-------+-------
+ ADAMS    |  9901 | MA
+ AGAWAM   | 15338 | MA
+ ASHFIELD |  1535 | MA
 (3 rows)
 
 /* pushdown math operators */
-SELECT * FROM smallzips WHERE pop > 1000 AND pop + pop <= 10000 LIMIT 3;
-   city    | pop  | state 
------------+------+-------
- BARRE     | 4546 | MA
- BLANDFORD | 1240 | MA
- BRIMFIELD | 3706 | MA
+SELECT * FROM smallzips WHERE pop > 1000 AND pop + pop <= 10000 ORDER BY city LIMIT 3;
+   city   | pop  | state 
+----------+------+-------
+ ASHFIELD | 1535 | MA
+ BARRE    | 4546 | MA
+ BECKET   | 1070 | MA
 (3 rows)
 
 /* join zips and zipsjson */
@@ -99,12 +97,12 @@ SELECT zips.city AS city, pop, state, loc
 (3 rows)
 
 /* query for a missing field */
-SELECT missing, city FROM zips_missing LIMIT 3;
- missing |    city     
----------+-------------
-         | BELCHERTOWN
-         | BARRE
+SELECT missing, city FROM zips_missing ORDER BY city LIMIT 3;
+ missing |   city   
+---------+----------
+         | ADAMS
          | AGAWAM
+         | ASHFIELD
 (3 rows)
 
 /* query with a bad type */
@@ -117,23 +115,23 @@ WARNING:  quasar_fdw: column loc is scalar type but got json/array response.
 
 /* Make quasar_fdw convert a float to integer
  * Quasar converts pop to a float and we convert it back */
-SELECT pop, loc0 FROM zips_convert WHERE loc0 < -70 LIMIT 3;
-  pop  |    loc0    
--------+------------
- 15338 | -72.622739
- 36963 |  -72.51565
-  4546 | -72.108354
+SELECT pop, loc0 FROM zips_convert WHERE loc0 < -70 ORDER BY pop LIMIT 3;
+ pop |    loc0    
+-----+------------
+  16 | -72.764124
+  97 | -72.960156
+ 122 | -72.844092
 (3 rows)
 
 /* convert string timestamps to timestamp values */
-SELECT * FROM commits LIMIT 5;
-            ts            |                   sha                    |  author_name  |             author_email              |                                                url                                                | comment_count 
---------------------------+------------------------------------------+---------------+---------------------------------------+---------------------------------------------------------------------------------------------------+---------------
- Thu Jan 29 15:52:37 2015 | b8a2302e6a0659875d03bfe4988c000f2ed027a0 | Greg Pfeil    | greg@technomadic.org                  | https://api.github.com/repos/slamdata/slamengine/commits/b8a2302e6a0659875d03bfe4988c000f2ed027a0 |             0
- Thu Jan 29 00:23:14 2015 | 18164870e8803e5885a88f8dfd53b82c80721503 | Moss Prescott | moss@theprescotts.com                 | https://api.github.com/repos/slamdata/slamengine/commits/18164870e8803e5885a88f8dfd53b82c80721503 |             0
- Wed Jan 28 17:06:29 2015 | b29d8f254e5df2c4d1792f077625924cd1fde2db | Moss Prescott | moss@theprescotts.com                 | https://api.github.com/repos/slamdata/slamengine/commits/b29d8f254e5df2c4d1792f077625924cd1fde2db |             0
- Wed Jan 28 16:20:27 2015 | 53d2e5684d9403194dff1cc63423c2590038d1c0 | Moss Prescott | mossprescott@users.noreply.github.com | https://api.github.com/repos/slamdata/slamengine/commits/53d2e5684d9403194dff1cc63423c2590038d1c0 |             0
- Wed Jan 28 16:27:52 2015 | 3d44ce48fc0670aaf39ba1acd0e1c161f14cc2d6 | Greg Pfeil    | greg@technomadic.org                  | https://api.github.com/repos/slamdata/slamengine/commits/3d44ce48fc0670aaf39ba1acd0e1c161f14cc2d6 |             0
+SELECT * FROM commits ORDER BY ts LIMIT 5;
+            ts            |                   sha                    |   author_name   |     author_email      |                                                url                                                | comment_count 
+--------------------------+------------------------------------------+-----------------+-----------------------+---------------------------------------------------------------------------------------------------+---------------
+ Wed Jan 14 23:10:11 2015 | 43b4018ae5d1e40bbbc2babb8929ed247b5d2dcb | Moss Prescott   | moss@theprescotts.com | https://api.github.com/repos/slamdata/slamengine/commits/43b4018ae5d1e40bbbc2babb8929ed247b5d2dcb |             0
+ Thu Jan 15 20:43:04 2015 | 3de46760d45c4fd0db9a03ad978361df3e8f0998 | Moss Prescott   | moss@theprescotts.com | https://api.github.com/repos/slamdata/slamengine/commits/3de46760d45c4fd0db9a03ad978361df3e8f0998 |             0
+ Fri Jan 16 02:08:26 2015 | 6a23a4c8809635828bbdeea145894287348c9bd5 | Moss Prescott   | moss@theprescotts.com | https://api.github.com/repos/slamdata/slamengine/commits/6a23a4c8809635828bbdeea145894287348c9bd5 |             0
+ Fri Jan 16 15:46:22 2015 | 5b54522e340244d618645ace4bd0cbb7edf8bd5b | John A. De Goes | john@degoes.net       | https://api.github.com/repos/slamdata/slamengine/commits/5b54522e340244d618645ace4bd0cbb7edf8bd5b |             0
+ Fri Jan 16 16:54:56 2015 | ad8a6a73f898860b48f3d71ed6110b3506a8c898 | Moss Prescott   | moss@theprescotts.com | https://api.github.com/repos/slamdata/slamengine/commits/ad8a6a73f898860b48f3d71ed6110b3506a8c898 |             0
 (5 rows)
 
 /* BUT we shouldn't push down comparisons on dates because the underlying data is string */
@@ -154,31 +152,31 @@ SELECT yr, yearint, yearfloat FROM olympics WHERE "yr" = '1924' LIMIT 3;
 
 /* pushdown of concat */
 SELECT * FROM smallzips WHERE length(concat(state, city)) > 4 /* push down concat columns */
-                        AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ LIMIT 5;
-    city     |  pop  | state 
--------------+-------+-------
- AGAWAM      | 15338 | MA
- CUSHMAN     | 36963 | MA
- BARRE       |  4546 | MA
- BELCHERTOWN | 10579 | MA
- BLANDFORD   |  1240 | MA
+                        AND state = concat('M'::char, 'A'::char) /* pushed down correctly */ ORDER BY city LIMIT 5;
+     city     |  pop  | state 
+--------------+-------+-------
+ ADAMS        |  9901 | MA
+ AGAWAM       | 15338 | MA
+ ASHFIELD     |  1535 | MA
+ ASHLEY FALLS |   561 | MA
+ BARRE        |  4546 | MA
 (5 rows)
 
 /* LIKE operator only supports constant right sides */
-SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char);
+SELECT * FROM smallzips WHERE state LIKE concat('B'::char, '%'::char) ORDER BY city;
  city | pop | state 
 ------+-----+-------
 (0 rows)
 
 /* array expansion */
-SELECT * FROM user_comments;
+SELECT * FROM user_comments ORDER BY comment_text;
  user_id | profile_name | age | title | comment_id | comment_text | comment_reply_to_profile | comment_reply_to_comment | comment_time 
 ---------+--------------+-----+-------+------------+--------------+--------------------------+--------------------------+--------------
- 8927524 | Mary Jane    |  29 | Dr    | F2372BAC   | I concur.    |                  9817361 | F8ACD164F                | 02-03-2015
  8927524 | Mary Jane    |  29 | Dr    | GH732AFC   | NA           |                  9654726 | A44124F                  | 03-01-2015
+ 8927524 | Mary Jane    |  29 | Dr    | F2372BAC   | I concur.    |                  9817361 | F8ACD164F                | 02-03-2015
 (2 rows)
 
-SELECT * FROM nested_expansion;
+SELECT * FROM nested_expansion ORDER BY vals;
  vals |                                                       topobj                                                        
 ------+---------------------------------------------------------------------------------------------------------------------
     7 | {"midArr":[[10,11,12],{"a":"j","b":"k","c":"l"}],"midObj":{"botArr":[13,14,15],"botObj":{"a":"m","b":"n","c":"o"}}}
@@ -203,25 +201,25 @@ SELECT * FROM zips ORDER BY length(city), -pop, state LIMIT 10;
 (10 rows)
 
 /* Date pushdown and ordering */
-SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIMIT 2;
+SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' ORDER BY ts LIMIT 2;
             ts            |             tstz             |                   sha                    
 --------------------------+------------------------------+------------------------------------------
- Mon Jan 19 19:15:53 2015 | Mon Jan 19 11:15:53 2015 PST | 0999da94bddcbc5bf536e3874aaba50582e96959
- Sat Jan 17 21:45:28 2015 | Sat Jan 17 13:45:28 2015 PST | 472dd80e8bdffae0c1bded28a91139941433550d
-(2 rows)
-
-SELECT * FROM commits_timestamps WHERE ts < DATE '2015-01-20' LIMIT 2;
-            ts            |             tstz             |                   sha                    
---------------------------+------------------------------+------------------------------------------
- Mon Jan 19 19:15:53 2015 | Mon Jan 19 11:15:53 2015 PST | 0999da94bddcbc5bf536e3874aaba50582e96959
- Sat Jan 17 21:45:28 2015 | Sat Jan 17 13:45:28 2015 PST | 472dd80e8bdffae0c1bded28a91139941433550d
-(2 rows)
-
-SELECT * FROM commits_timestamps WHERE tstz < TIMESTAMPTZ '2015-01-15 19:43:04 PST';
-            ts            |             tstz             |                   sha                    
---------------------------+------------------------------+------------------------------------------
- Thu Jan 15 20:43:04 2015 | Thu Jan 15 12:43:04 2015 PST | 3de46760d45c4fd0db9a03ad978361df3e8f0998
  Wed Jan 14 23:10:11 2015 | Wed Jan 14 15:10:11 2015 PST | 43b4018ae5d1e40bbbc2babb8929ed247b5d2dcb
+ Thu Jan 15 20:43:04 2015 | Thu Jan 15 12:43:04 2015 PST | 3de46760d45c4fd0db9a03ad978361df3e8f0998
+(2 rows)
+
+SELECT * FROM commits_timestamps WHERE ts < DATE '2015-01-20' ORDER BY ts LIMIT 2;
+            ts            |             tstz             |                   sha                    
+--------------------------+------------------------------+------------------------------------------
+ Wed Jan 14 23:10:11 2015 | Wed Jan 14 15:10:11 2015 PST | 43b4018ae5d1e40bbbc2babb8929ed247b5d2dcb
+ Thu Jan 15 20:43:04 2015 | Thu Jan 15 12:43:04 2015 PST | 3de46760d45c4fd0db9a03ad978361df3e8f0998
+(2 rows)
+
+SELECT * FROM commits_timestamps WHERE tstz < TIMESTAMPTZ '2015-01-15 19:43:04 PST' ORDER BY ts;
+            ts            |             tstz             |                   sha                    
+--------------------------+------------------------------+------------------------------------------
+ Wed Jan 14 23:10:11 2015 | Wed Jan 14 15:10:11 2015 PST | 43b4018ae5d1e40bbbc2babb8929ed247b5d2dcb
+ Thu Jan 15 20:43:04 2015 | Thu Jan 15 12:43:04 2015 PST | 3de46760d45c4fd0db9a03ad978361df3e8f0998
  Fri Jan 16 02:08:26 2015 | Thu Jan 15 18:08:26 2015 PST | 6a23a4c8809635828bbdeea145894287348c9bd5
 (3 rows)
 
@@ -232,3 +230,14 @@ SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;
  Thu Jan 29 00:23:14 2015 | Wed Jan 28 16:23:14 2015 PST | 18164870e8803e5885a88f8dfd53b82c80721503
 (2 rows)
 
+/* Bad types should emit error contexts appropriately */
+SELECT city FROM zips_badtype ORDER BY city;
+ERROR:  invalid input syntax for integer: "AARON"
+CONTEXT:  column "city" of foreign table "zips_badtype"
+SELECT state FROM zips_badtype ORDER BY state;
+ERROR:  value too long for type character(1)
+CONTEXT:  column "state" of foreign table "zips_badtype"
+SELECT pop FROM zips_badtype ORDER BY pop;
+ERROR:  date/time field value out of range: "0"
+HINT:  Perhaps you need a different "datestyle" setting.
+CONTEXT:  column "pop" of foreign table "zips_badtype"

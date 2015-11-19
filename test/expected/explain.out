@@ -193,10 +193,10 @@ EXPLAIN (COSTS off) SELECT * FROM commits ORDER BY ts, sha;
 (4 rows)
 
 /* VERBOSE on */
-EXPLAIN (VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY pop DESC;
+EXPLAIN (COSTS off, VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY pop DESC;
                                                QUERY PLAN                                               
 --------------------------------------------------------------------------------------------------------
- Foreign Scan on public.zips  (cost=111.00..111.13 rows=6 width=48)
+ Foreign Scan on public.zips
    Output: city, pop, state
    Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("state" = 'CO')) ORDER BY "pop" DESC
    Compiled Mongo Query: Mongo

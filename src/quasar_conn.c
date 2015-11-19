@@ -374,10 +374,10 @@ execute_info_curl(QuasarConn *conn, char *url)
 static size_t
 header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 {
-    elog(DEBUG2, "entering function %s", __func__);
     const char *HTTP_1_1 = "HTTP/1.1";
     size_t      segsize = size * nmemb;
     quasar_info_curl_context *ctx = (quasar_info_curl_context *) userp;
+    elog(DEBUG2, "entering function %s", __func__);
 
     if (strncmp(buffer, HTTP_1_1, strlen(HTTP_1_1)) == 0)
     {
@@ -400,8 +400,8 @@ throwaway_body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 static size_t
 info_body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 {
-    elog(DEBUG1, "entering function %s", __func__);
     quasar_info_curl_context *ctx = (quasar_info_curl_context *)userp;
+    elog(DEBUG1, "entering function %s", __func__);
     if (ctx->status == 200)
         appendBinaryStringInfo(&ctx->buf, buffer, size * nmemb);
     return size * nmemb;
@@ -410,10 +410,11 @@ info_body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 static size_t
 query_body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 {
-    elog(DEBUG3, "entering function %s", __func__);
     size_t      segsize = size * nmemb, offset = 0, new_alloc_tuples;
     quasar_query_curl_context *ctx = (quasar_query_curl_context *) userp;
     MemoryContext oldcontext;
+
+    elog(DEBUG3, "entering function %s", __func__);
 
     if (ctx->status != 200)
         return segsize;

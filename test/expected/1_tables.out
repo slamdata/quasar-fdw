@@ -66,3 +66,5 @@ CREATE FOREIGN TABLE test_times(t time)
        SERVER quasar OPTIONS (table 'testtime_doesnt_exist');
 CREATE FOREIGN TABLE test_intervals(i interval)
        SERVER quasar OPTIONS (table 'testintervals_doesnt_exist');
+CREATE FOREIGN TABLE zips_badtype(city int, state char(1), pop date)
+       SERVER quasar OPTIONS (table 'zips');

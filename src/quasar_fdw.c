@@ -744,7 +744,9 @@ quasarGetForeignPlan(PlannerInfo *root,
      */
     foreach(lc, scan_clauses)
     {
-        RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+        RestrictInfo *rinfo;
+
+        rinfo = (RestrictInfo *) lfirst(lc);
 
         Assert(IsA(rinfo, RestrictInfo));
 
@@ -841,8 +843,9 @@ quasarBeginForeignScan(ForeignScanState *node,
      * ExplainForeignScan and EndForeignScan.
      *
      */
-    ForeignScan *fsplan = (ForeignScan *)node->ss.ps.plan;
-    EState *estate = node->ss.ps.state;
+
+    ForeignScan *fsplan;
+    EState *estate;
     QuasarFdwScanState *fsstate;
     ForeignTable *table;
     ForeignServer *server;
@@ -852,6 +855,9 @@ quasarBeginForeignScan(ForeignScanState *node,
     Relation rel;
 
     elog(DEBUG1, "entering function %s", __func__);
+
+    fsplan = (ForeignScan *)node->ss.ps.plan;
+    estate = node->ss.ps.state;
 
     /*
      * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
@@ -891,10 +897,11 @@ quasarBeginForeignScan(ForeignScanState *node,
     i = 0;
     foreach(lc, fsplan->fdw_exprs)
     {
-        Node       *param_expr = (Node *) lfirst(lc);
+        Node       *param_expr;
         Oid         typefnoid;
         bool        isvarlena;
 
+        param_expr = (Node *) lfirst(lc);
         fsstate->param_type[i] = exprType(param_expr);
         getTypeOutputInfo(fsstate->param_type[i], &typefnoid, &isvarlena);
         fmgr_info(typefnoid, &fsstate->param_flinfo[i]);
@@ -950,11 +957,15 @@ quasarIterateForeignScan(ForeignScanState *node)
      * (just as you would need to do in the case of a data type mismatch).
      */
 
-    QuasarFdwScanState *fsstate = (QuasarFdwScanState *)node->fdw_state;
-    TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
-    ExprContext *econtext = node->ss.ps.ps_ExprContext;
+    QuasarFdwScanState *fsstate;
+    TupleTableSlot *slot;
+    ExprContext *econtext;
 
     elog(DEBUG4, "entering function %s", __func__);
+
+    fsstate = (QuasarFdwScanState *)node->fdw_state;
+    slot = node->ss.ss_ScanTupleSlot;
+    econtext = node->ss.ps.ps_ExprContext;
 
     /*
      * If this is the first call after Begin or ReScan, we need to create the
@@ -1001,9 +1012,10 @@ quasarEndForeignScan(ForeignScanState *node)
        * remote servers should be cleaned up.
        */
 
-      elog(DEBUG1, "entering function %s", __func__);
+    QuasarFdwScanState *festate;
+    elog(DEBUG1, "entering function %s", __func__);
 
-      QuasarFdwScanState *festate = (QuasarFdwScanState *) node->fdw_state;
+    festate = (QuasarFdwScanState *) node->fdw_state;
 
       /* if festate is NULL, we are in EXPLAIN; nothing to do */
       if (festate) {
@@ -1019,9 +1031,10 @@ quasarEndForeignScan(ForeignScanState *node)
      * return exactly the same rows.
      */
 
-    elog(DEBUG1, "entering function %s", __func__);
-    QuasarFdwScanState *fsstate = (QuasarFdwScanState *) node->fdw_state;
 
+     QuasarFdwScanState *fsstate;
+    elog(DEBUG1, "entering function %s", __func__);
+    fsstate = (QuasarFdwScanState *) node->fdw_state;
     QuasarRewindQuery(fsstate->conn);
  }
 
@@ -1034,14 +1047,14 @@ quasarEndForeignScan(ForeignScanState *node)
 static void
 quasarExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
-    elog(DEBUG1, "Entering function %s", __func__);
-
     List           *fdw_private;
     char           *sql;
     char           *mongo_query;
     QuasarConn     *conn;
     ForeignTable   *table;
     ForeignServer  *server;
+
+    elog(DEBUG1, "Entering function %s", __func__);
 
     fdw_private = ((ForeignScan *) node->ss.ps.plan)->fdw_private;
     sql = strVal(list_nth(fdw_private, FdwScanPrivateSelectSql));

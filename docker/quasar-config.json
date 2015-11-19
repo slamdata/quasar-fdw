@@ -1,0 +1,12 @@
+{
+    "server": {
+        "port": 8080
+    },
+    "mountings": {
+        "/test": {
+            "mongodb": {
+                "connectionUri": "mongodb://mongodb/quasar"
+            }
+        }
+    }
+}

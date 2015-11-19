@@ -114,7 +114,9 @@ static bool is_json_type(parser *p) {
 }
 
 static void arrayAppendCommaIf(parser *p) {
-    StringInfo s = &p->array;
+    StringInfo s;
+
+    s = &p->array;
     if (s->len <= 0) return;
     switch(s->data[s->len - 1]) {
     case '{':
@@ -140,10 +142,13 @@ static void jsonAppendCommaIf(parser *p) {
 }
 
 char *checkConversions(parser *p, char *value) {
-    Form_pg_attribute col = get_column(p);
+    Form_pg_attribute col;
+    size_t len;
 
+    col = get_column(p);
     if (col->attndims > 0) return value;
-    size_t len = strlen(value);
+
+    len = strlen(value);
 
     switch (col->atttypid) {
     case INT2OID:
@@ -158,9 +163,9 @@ char *checkConversions(parser *p, char *value) {
 }
 
 static void store_datum(parser *p, char *string, const char *fmt) {
-    int i = p->cur_col;
+    int i;
 
-    elog(DEBUG4, "store_datum: level %d, %s", p->level, string);
+    i = p->cur_col;
 
     if (p->level == COLUMN_LEVEL &&
         !get_column(p)->attisdropped) {
@@ -206,13 +211,11 @@ static void store_null(parser *p) {
 
 /* Yajl callbacks */
 static int cb_null(void * ctx) {
-    elog(DEBUG4, "entering function %s", __func__);
     store_null((parser*) ctx);
     return YAJL_OK;
 }
 
 static int cb_boolean(void * ctx, int boolean) {
-    elog(DEBUG4, "entering function %s", __func__);
     store_datum((parser*) ctx, boolean ? "true" : "false", "%s");
     return YAJL_OK;
 }
@@ -221,8 +224,9 @@ static int cb_boolean(void * ctx, int boolean) {
 static int cb_string(void * ctx,
                     const unsigned char * value,
                     size_t len) {
-    elog(DEBUG4, "entering function %s", __func__);
-    char * s = pnstrdup((const char *)value, len);
+    char * s;
+
+    s = pnstrdup((const char *)value, len);
     store_datum((parser*) ctx, s, "\"%s\"");
     pfree(s);
     return YAJL_OK;
@@ -231,8 +235,9 @@ static int cb_string(void * ctx,
 static int cb_number(void * ctx,
                      const char * value,
                      size_t len) {
-    elog(DEBUG4, "entering function %s", __func__);
-    char * s = pnstrdup(value, len);
+    char * s;
+
+    s = pnstrdup(value, len);
     store_datum((parser*) ctx, s, "%s");
     pfree(s);
     return YAJL_OK;
@@ -241,12 +246,12 @@ static int cb_number(void * ctx,
 static int cb_map_key(void * ctx,
                       const unsigned char * stringVal,
                       size_t stringLen) {
-    elog(DEBUG4, "entering function %s", __func__);
-
-    parser *p = (parser*) ctx;
+    parser *p;
     size_t i;
-    char * s = pnstrdup((const char*) stringVal, stringLen);
+    char * s;
 
+    p = (parser*) ctx;
+    s = pnstrdup((const char*) stringVal, stringLen);
     if (p->level == COLUMN_LEVEL) {
         /* Find the column */
         p->cur_col = NO_COLUMN;
@@ -271,10 +276,10 @@ static int cb_map_key(void * ctx,
 }
 
 static int cb_start_map(void * ctx) {
-    elog(DEBUG4, "entering function %s", __func__);
-    parser *p = (parser*) ctx;
+    parser *p;
     int i;
 
+    p = (parser*) ctx;
     if (p->level == TOP_LEVEL && p->record_complete) {
         return YAJL_CANCEL;
     } else if (p->level == TOP_LEVEL) {
@@ -300,9 +305,9 @@ static int cb_start_map(void * ctx) {
 
 
 static int cb_end_map(void * ctx) {
-    elog(DEBUG4, "entering function %s", __func__);
+    parser *p;
 
-    parser *p = (parser*) ctx;
+    p = (parser*) ctx;
     if (p->level > COLUMN_LEVEL) {
         if (is_json_type(p)) {
             appendStringInfoChar(&p->json, '}');
@@ -326,7 +331,8 @@ static int cb_end_map(void * ctx) {
 }
 
 static int cb_start_array(void * ctx) {
-    parser *p = (parser*) ctx;
+    parser *p;
+    p = (parser*) ctx;
     if (p->level >= COLUMN_LEVEL) {
         if (is_array_type(p)) {
             arrayAppendCommaIf(p);
@@ -341,7 +347,8 @@ static int cb_start_array(void * ctx) {
 }
 
 static int cb_end_array(void * ctx) {
-    parser *p = (parser*) ctx;
+    parser *p;
+    p = (parser*) ctx;
     if (p->level > COLUMN_LEVEL) {
         if (is_array_type(p)) {
             appendStringInfoChar(&p->array, '}');
@@ -406,9 +413,10 @@ static yajl_alloc_funcs allocs = {yajl_palloc, yajl_repalloc, yajl_pfree, NULL};
 
 
 void quasar_parse_alloc(quasar_parse_context *ctx, Relation rel) {
+    parser *p;
     elog(DEBUG4, "entering function %s", __func__);
 
-    parser *p = palloc(sizeof(parser));
+    p = palloc(sizeof(parser));
     p->cur_col = NO_COLUMN;
     p->level = TOP_LEVEL;
     p->record_complete = false;
@@ -440,9 +448,9 @@ void quasar_parse_free(quasar_parse_context *ctx) {
 }
 
 void quasar_parse_reset(quasar_parse_context *ctx) {
+    parser *p;
     elog(DEBUG4, "entering function %s", __func__);
-
-    parser *p = (parser*) ctx->p;
+    p = (parser*) ctx->p;
     p->cur_col = NO_COLUMN;
     p->level = TOP_LEVEL;
     p->record_complete = false;
@@ -459,13 +467,17 @@ quasar_parse(quasar_parse_context *ctx,
              size_t buf_size,
              HeapTuple *tuple)
 {
+    bool found;
+    parser *p;
+    yajl_status status;
+    yajl_handle hand;
+    size_t bytes;
+
     elog(DEBUG4, "entering function %s", __func__);
 
-    bool found = false;
-    parser *p = (parser*) ctx->p;
-    yajl_status status;
-    yajl_handle hand = ctx->handle;
-    size_t bytes;
+    found = false;
+    p = (parser*) ctx->p;
+    hand = ctx->handle;
 
     if (*buf_loc < buf_size) {
         /* Response is formed as many json objects
@@ -514,9 +526,11 @@ quasar_parse(quasar_parse_context *ctx,
 static void
 conversion_error_callback(void *arg)
 {
-    parser *p = (parser*) arg;
-    TupleDesc tupdesc = p->attinmeta->tupdesc;
+    parser *p;
+    TupleDesc tupdesc;
 
+    p = (parser*) arg;
+    tupdesc = p->attinmeta->tupdesc;
     if (p->cur_col < tupdesc->natts)
         errcontext("column \"%s\" of foreign table \"%s\"",
                    NameStr(tupdesc->attrs[p->cur_col]->attname),
