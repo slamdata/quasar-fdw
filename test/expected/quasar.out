@@ -241,3 +241,16 @@ SELECT pop FROM zips_badtype ORDER BY pop;
 ERROR:  date/time field value out of range: "0"
 HINT:  Perhaps you need a different "datestyle" setting.
 CONTEXT:  column "pop" of foreign table "zips_badtype"
+/* Aggregations */
+SELECT count(*) FROM smallzips;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
+ count 
+-------
+  2384
+(1 row)
+

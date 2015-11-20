@@ -262,9 +262,9 @@ static int cb_map_key(void * ctx,
                 break;
             }
         }
-        if (p->cur_col == NO_COLUMN) {
-            elog(ERROR, "quasar_fdw internal: Couldnt find column for returned field: %s", s);
-        }
+
+        /* This is OK if we did a SELECT NULL */
+        elog(DEBUG3, "quasar_fdw internal: Couldnt find column for returned field: %s", s);
     } else if (p->level > COLUMN_LEVEL) {
         if (is_json_type(p)) {
             jsonAppendCommaIf(p);

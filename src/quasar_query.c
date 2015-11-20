@@ -100,13 +100,16 @@ static void deparseRelabelType(RelabelType *node, deparse_expr_cxt *context);
 static void deparseBoolExpr(BoolExpr *node, deparse_expr_cxt *context);
 static void deparseNullTest(NullTest *node, deparse_expr_cxt *context);
 static void deparseArrayExpr(ArrayExpr *node, deparse_expr_cxt *context);
+static void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType);
 static void printRemoteParam(int paramindex, Oid paramtype, int32 paramtypmod,
                              deparse_expr_cxt *context);
 static void printRemotePlaceholder(Oid paramtype, int32 paramtypmod,
                                    deparse_expr_cxt *context);
 static char * quasar_quote_identifier(const char *s);
+static Oid getElementType(Oid type, int depth);
 
 /* Functions used for rendering query and checking quasar ability */
+bool quasar_can_handle_type(Oid type);
 bool quasar_has_const(Const *node);
 bool quasar_has_function(FuncExpr *func, char **name);
 bool quasar_has_op(OpExpr *op, char **name, char *opkind, bool *asfunc);
@@ -170,22 +173,11 @@ is_foreign_expr(PlannerInfo *root,
     return true;
 }
 
-
 /*
  * These macros is used by foreign_expr_walker to identify PostgreSQL
  * types that can be translated to Quasar SQL-2.
  */
-#define canHandleType(x) ((x) == TEXTOID || (x) == CHAROID              \
-                          || (x) == BPCHAROID                           \
-                          || (x) == VARCHAROID || (x) == NAMEOID        \
-                          || (x) == INT8OID || (x) == INT2OID           \
-                          || (x) == INT4OID || (x) == OIDOID            \
-                          || (x) == FLOAT4OID || (x) == FLOAT8OID       \
-                          || (x) == NUMERICOID || (x) == DATEOID        \
-                          || (x) == TIMEOID || (x) == TIMESTAMPOID      \
-                          || (x) == INTERVALOID || (x) == BOOLOID       \
-                          || (x) == TIMESTAMPTZOID)
-#define checkType(type) if (!canHandleType((type))) return false
+#define checkType(type) if (!quasar_can_handle_type((type))) return false
 #define checkCollation(collid) if (collid != InvalidOid &&              \
                                    collid != DEFAULT_COLLATION_OID) return false
 #define foreign_recurse(arg)\
@@ -214,6 +206,8 @@ foreign_expr_walker(Node *node,
     /* Need do nothing for empty subexpressions */
     if (node == NULL)
         return true;
+
+    elog(DEBUG1, "foreign_expr_walker %d", nodeTag(node));
 
     switch (nodeTag(node))
     {
@@ -468,6 +462,48 @@ bool quasar_has_function(FuncExpr *func, char **name) {
 
     pfree(opername);
     return false;
+}
+
+/* Recursively get the element type of array types
+ * Return argument if not an array type
+ **/
+Oid getElementType(Oid type, int depth)
+{
+    Oid elemType = 0;
+    HeapTuple tp;
+
+    tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
+    if (HeapTupleIsValid(tp))
+    {
+        Form_pg_type typtup = (Form_pg_type) GETSTRUCT(tp);
+        elemType = typtup->typelem;
+        ReleaseSysCache(tp);
+    }
+
+    if (elemType != 0) {
+        if (depth == 1)
+            return elemType;
+        else
+            return getElementType(elemType, depth - 1);
+
+    }
+    return type;
+}
+
+/* Check to see if quasar can handle the type */
+bool quasar_can_handle_type(Oid type)
+{
+    type = getElementType(type, -1);
+    return (type == TEXTOID || type == CHAROID
+            || type == BPCHAROID
+            || type == VARCHAROID || type == NAMEOID
+            || type == INT8OID || type == INT2OID
+            || type == INT4OID || type == OIDOID
+            || type == FLOAT4OID || type == FLOAT8OID
+            || type == NUMERICOID || type == DATEOID
+            || type == TIMEOID || type == TIMESTAMPOID
+            || type == INTERVALOID || type == BOOLOID
+            || type == TIMESTAMPTZOID);
 }
 
 /* quasar_has_const
@@ -1052,6 +1088,7 @@ deparseConst(Const *node, deparse_expr_cxt *context)
     getTypeOutputInfo(node->consttype,
                       &typoutput, &typIsVarlena);
     extval = OidOutputFunctionCall(typoutput, node->constvalue);
+
     deparseLiteral(buf, node->consttype, extval, node->constvalue);
 }
 
@@ -1588,7 +1625,51 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
     }
     break;
     default:
-        deparseStringLiteral(buf, svalue);
-        break;
+    {
+        Oid elemType = getElementType(type, 1);
+        if (elemType != type) {
+            deparseArrayLiteral(buf, value, type, elemType);
+        } else {
+            deparseStringLiteral(buf, svalue);
+        }
     }
+    break;
+    }
+}
+
+void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType)
+{
+    ArrayIterator iterator;
+    bool first = true;
+    Datum datum;
+    bool isNull;
+    Oid  typoutput;
+    bool typIsVarlena;
+    char *svalue;
+
+    getTypeOutputInfo(elemType, &typoutput, &typIsVarlena);
+
+    appendStringInfoChar(buf, '[');
+
+    /* loop through the array elements */
+    iterator = array_create_iterator(DatumGetArrayTypeP(value), 0);
+    while (array_iterate(iterator, &datum, &isNull))
+    {
+        if (!first)
+        {
+            appendStringInfoString(buf, ", ");
+        }
+        first = false;
+
+        if (isNull)
+            appendStringInfoString(buf, "NULL");
+        else
+        {
+            svalue = OidOutputFunctionCall(typoutput, datum);
+            deparseLiteral(buf, elemType, svalue, value);
+        }
+    }
+    array_free_iterator(iterator);
+
+    appendStringInfoChar(buf, ']');
 }

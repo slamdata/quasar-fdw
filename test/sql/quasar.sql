@@ -55,3 +55,6 @@ SELECT * FROM commits_timestamps ORDER BY ts DESC LIMIT 2;
 SELECT city FROM zips_badtype ORDER BY city;
 SELECT state FROM zips_badtype ORDER BY state;
 SELECT pop FROM zips_badtype ORDER BY pop;
+/* Aggregations */
+SELECT count(*) FROM smallzips;
+SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');

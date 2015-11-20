@@ -267,3 +267,20 @@ EXPLAIN (COSTS off) SELECT * FROM test_intervals WHERE i > INTERVAL '1 year';
    Quasar query: SELECT "i" FROM "testintervals_doesnt_exist"
 (3 rows)
 
+/* Aggregations */
+EXPLAIN (COSTS off) SELECT count(*) FROM smallzips;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Aggregate
+   ->  Foreign Scan on smallzips
+         Quasar query: SELECT NULL FROM "smallZips"
+(3 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Aggregate
+   ->  Foreign Scan on zips
+         Quasar query: SELECT NULL FROM "zips" WHERE (("state"  IN (['CA', 'OR', 'WA'])))
+(3 rows)
+

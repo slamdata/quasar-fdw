@@ -57,3 +57,6 @@ EXPLAIN (COSTS off) SELECT * FROM test_times WHERE t < TIME '11:04:23.551';
 EXPLAIN (COSTS off) SELECT * FROM test_intervals WHERE i < INTERVAL '7 days 4 hours 5 minutes';
 /* Intervals > 1 month can't be pushed down because quasar doesn't handle them */
 EXPLAIN (COSTS off) SELECT * FROM test_intervals WHERE i > INTERVAL '1 year';
+/* Aggregations */
+EXPLAIN (COSTS off) SELECT count(*) FROM smallzips;
+EXPLAIN (COSTS off) SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
