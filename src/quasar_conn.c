@@ -36,6 +36,11 @@ void appendStringInfoQuery(CURL *curl,
                            const char *value,
                            bool is_first);
 
+void QuasarExecuteQueryGet(QuasarConn *conn, char *query);
+void QuasarExecuteQueryPost(QuasarConn *conn, char *query,
+                            const char **param_values, size_t numParams);
+void QuasarDeletePostData(QuasarConn *conn);
+
 extern void
 QuasarGlobalConnectionInit()
 {
@@ -75,6 +80,7 @@ QuasarGetConnection(ForeignServer *server)
     conn->curlm = NULL;
     conn->curl = curl_easy_init();
 
+    conn->post_path = NULL;
     conn->ongoing_transfers = 0;
     conn->exec_transfer = 0;
 
@@ -102,6 +108,11 @@ QuasarPrepQuery(QuasarConn *conn, EState *estate, Relation rel)
 extern void
 QuasarCleanupConnection(QuasarConn *conn)
 {
+    if (conn->post_path != NULL)
+    {
+        QuasarDeletePostData(conn);
+    }
+
     if (conn->curlm != NULL) {
         curl_multi_remove_handle(conn->curlm, conn->curl);
         curl_multi_cleanup(conn->curlm);
@@ -121,6 +132,11 @@ QuasarCleanupConnection(QuasarConn *conn)
 extern void
 QuasarResetConnection(QuasarConn *conn)
 {
+    if (conn->post_path != NULL)
+    {
+        QuasarDeletePostData(conn);
+    }
+
     if (conn->curlm != NULL) {
         curl_multi_remove_handle(conn->curlm, conn->curl);
     }
@@ -136,6 +152,58 @@ extern void
 QuasarExecuteQuery(QuasarConn *conn, char *query,
                    const char **param_values, size_t numParams)
 {
+    if (numParams > 0)
+        QuasarExecuteQueryPost(conn, query, param_values, numParams);
+    else
+        QuasarExecuteQueryGet(conn, query);
+
+    conn->ongoing_transfers = 1;
+    conn->exec_transfer = 1;
+    conn->qctx->tuples = NULL;
+    conn->qctx->num_tuples = 0;
+    conn->qctx->next_tuple = 0;
+    conn->qctx->alloc_tuples = 0;
+    conn->qctx->batch_count = 0;
+    conn->qctx->status = 0;
+
+    /* Reset the parse context (for rescans) */
+    quasar_parse_reset(&conn->qctx->parse);
+}
+
+void
+QuasarExecuteQueryGet(QuasarConn *conn, char *query)
+{
+    int sc;
+    CURL *curl = conn->curl;
+    CURLM *curlm = conn->curlm;
+    StringInfoData url;
+
+    initStringInfo(&url);
+    appendStringInfo(&url, "%s/query/fs%s", conn->server, conn->path);
+    appendStringInfoQuery(curl, &url, "q", query, true);
+    conn->full_url = url.data;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.data);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, conn->qctx);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, query_body_handler);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, conn->qctx);
+
+    sc = curl_multi_add_handle(curlm, curl);
+    if (sc != CURLM_OK)
+    {
+        QuasarCleanupConnection(conn);
+        elog(ERROR, "quasar_fdw: curl add handle failed %s", curl_multi_strerror(sc));
+    }
+
+
+}
+
+void
+QuasarExecuteQueryPost(QuasarConn *conn, char *query,
+                       const char **param_values, size_t numParams)
+{
     int sc, i;
     CURL *curl = curl_easy_init();
     CURLM *curlm = conn->curlm;
@@ -144,7 +212,6 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
     StringInfoData dest;
     quasar_info_curl_context infoctx;
     struct curl_slist *headers = NULL;
-    char *destination;
 
     Assert(conn->curlm != NULL && conn->qctx != NULL);
 
@@ -161,9 +228,9 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
 
     initStringInfo(&dest);
     appendStringInfo(&dest, "%s/fdw_%d", conn->path, rand());
-    destination = pstrdup(dest.data);
+    conn->post_path = pstrdup(dest.data);
     resetStringInfo(&dest);
-    appendStringInfo(&dest, "Destination: %s", destination);
+    appendStringInfo(&dest, "Destination: %s", conn->post_path);
     headers = curl_slist_append(headers, dest.data);
 
     /* Set up CURL instance. */
@@ -183,20 +250,22 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
     if (sc != CURLE_OK)
     {
         QuasarCleanupConnection(conn);
-        elog(ERROR, "quasar_fdw: curl %s failed: %s", url.data, curl_easy_strerror(sc));
+        elog(ERROR, "quasar_fdw: curl %s failed: %s",
+             url.data, curl_easy_strerror(sc));
     }
 
     if (infoctx.status != 200)
     {
         QuasarCleanupConnection(conn);
-        elog(ERROR, "quasar_fdw: Got bad response from quasar: %d (%s)", infoctx.status, url.data);
+        elog(ERROR, "quasar_fdw: Got bad response from quasar: %d (%s)",
+             infoctx.status, url.data);
     }
 
     /* Ok now we go get the data */
     curl = conn->curl;
 
     resetStringInfo(&url);
-    appendStringInfo(&url, "%s/data/fs%s", conn->server, destination);
+    appendStringInfo(&url, "%s/data/fs%s", conn->server, conn->post_path);
     conn->full_url = url.data;
 
     curl_easy_setopt(curl, CURLOPT_URL, url.data);
@@ -212,18 +281,6 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
         QuasarCleanupConnection(conn);
         elog(ERROR, "quasar_fdw: curl add handle failed %s", curl_multi_strerror(sc));
     }
-
-    conn->ongoing_transfers = 1;
-    conn->exec_transfer = 1;
-    conn->qctx->tuples = NULL;
-    conn->qctx->num_tuples = 0;
-    conn->qctx->next_tuple = 0;
-    conn->qctx->alloc_tuples = 0;
-    conn->qctx->batch_count = 0;
-    conn->qctx->status = 0;
-
-    /* Reset the parse context (for rescans) */
-    quasar_parse_reset(&conn->qctx->parse);
 }
 
 extern void
@@ -283,7 +340,45 @@ QuasarRewindQuery(QuasarConn *conn)
 
     /* Otherwise, we have to reset the whole connection */
     QuasarResetConnection(conn);
+}
 
+void
+QuasarDeletePostData(QuasarConn *conn)
+{
+    int cc;
+    quasar_info_curl_context ctx;
+    CURL *curl = curl_easy_init();
+    StringInfoData url;
+
+    ctx.status = 0;
+
+    initStringInfo(&url);
+    appendStringInfo(&url, "%s/data/fs%s", conn->server, conn->post_path);
+    conn->post_path = NULL;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.data);
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, throwaway_body_handler);
+
+    elog(DEBUG1, "curling DELETE %s", url.data);
+    cc = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (cc != CURLE_OK)
+    {
+        QuasarCleanupConnection(conn);
+        elog(ERROR, "quasar_fdw: curl DELETE %s failed %s",
+             url.data, curl_easy_strerror(cc));
+    }
+
+    if (ctx.status != 200)
+    {
+        QuasarCleanupConnection(conn);
+        elog(ERROR, "quasar_fdw: got bad response from quasar: %d (DELETE %s)",
+             ctx.status, url.data);
+    }
 }
 
 extern char *

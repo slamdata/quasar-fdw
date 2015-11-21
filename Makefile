@@ -24,7 +24,7 @@ QUASAR_VERSION = $(shell cat $(QUASAR_DIR)/version.sbt | cut -d'=' -f2 | xargs)
 
 ## Quasar FDW Configuration
 
-PG_CPPFLAGS = -std=c99
+PG_CPPFLAGS = -std=c99 -g
 CURL_LIB = $(shell curl-config --libs)
 MY_LIBS = $(CURL_LIB) -lyajl
 SHLIB_LINK = $(MY_LIBS)

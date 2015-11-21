@@ -121,6 +121,9 @@ typedef struct quasar_info_curl_context {
  */
 typedef struct QuasarConn
 {
+    char *post_path;            /* Path where a POST request has put data
+                                 * Needs to be DELETEd afterwards */
+
     char *server;
     char *path;
     char *full_url;
