@@ -37,6 +37,7 @@ POSTGRES_VERSION_REGEX=9.4
 
 ## User-customizable variables
 FDWVERSION=${FDWVERSION:-v0.2.3}
+YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/yanatan16/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/yanatan16/quasar_fdw}
 
@@ -101,7 +102,7 @@ function install_fdw()
 function install_yajl()
 {
     log "Installing yajl version $YAJLVERSION"
-    (logx git clone https://github.com/lloyd/yajl "yajl_$YAJLVERSION") \
+    (logx git clone "$YAJLCLONEURL" "yajl_$YAJLVERSION") \
          || error "Clone of YAJL repository failed"
     mypushd "yajl_$YAJLVERSION"
     (logx git checkout $YAJLVERSION) \
