@@ -183,6 +183,7 @@ is_foreign_expr(PlannerInfo *root,
 #define foreign_recurse(arg)\
     if (!foreign_expr_walker((Node *) (arg), glob_cxt)) \
         return false
+#define IS_INTEGER(x) ((x) == INT2OID || (x) == INT4OID || (x) == INT8OID)
 
 /*
  * Check if expression is safe to execute remotely, and return true if so.
@@ -206,8 +207,6 @@ foreign_expr_walker(Node *node,
     /* Need do nothing for empty subexpressions */
     if (node == NULL)
         return true;
-
-    elog(DEBUG1, "foreign_expr_walker %d", nodeTag(node));
 
     switch (nodeTag(node))
     {
@@ -1163,9 +1162,29 @@ deparseArrayRef(ArrayRef *node, deparse_expr_cxt *context)
      */
     foreach(uplist_item, node->refupperindexpr)
     {
-        appendStringInfoChar(buf, '[');
-        deparseExpr(lfirst(uplist_item), context);
-        appendStringInfoChar(buf, ']');
+        /* Postgres is 1-based but Quasar is 0-based */
+        Expr * node = lfirst(uplist_item);
+        if (nodeTag(node) == T_Const &&
+            IS_INTEGER(((Const *)node)->consttype))
+        {
+            Const * c = (Const*) node;
+            Oid type = c->consttype;
+            if (type == INT2OID)
+                c->constvalue = Int8GetDatum(DatumGetUInt8(c->constvalue) - 1);
+            else if (type == INT4OID)
+                c->constvalue = Int16GetDatum(DatumGetInt16(c->constvalue) - 1);
+            else
+                c->constvalue = Int32GetDatum(DatumGetInt32(c->constvalue) - 1);
+            appendStringInfoChar(buf, '[');
+            deparseExpr(node, context);
+            appendStringInfoChar(buf, ']');
+        }
+        else
+        {
+            appendStringInfoString(buf, "[(");
+            deparseExpr(node, context);
+            appendStringInfoString(buf, "- 1)]");
+        }
     }
 
     appendStringInfoChar(buf, ')');
