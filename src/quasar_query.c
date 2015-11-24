@@ -779,7 +779,14 @@ deparsePushdownTargetList(StringInfo buf,
                           Bitmapset *attrs_used,
                           List **scan_tlist)
 {
-    ListCell       *lc;
+    /* TODO When 9.5 is stable
+       Iterate through columnlist, pulling out expressions
+       If they can be executed (foreign_expr_walk),
+       append them to scan_tlist
+       and run deparseExpr(expr)
+       If they cannot be executed, make sure to add any used columns
+       in the expression into scan_tlist and run deparseColumnRef */
+
     TupleDesc       tupdesc = RelationGetDescr(rel);
     bool            have_wholerow;
     bool            first;
