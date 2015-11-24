@@ -153,6 +153,8 @@ EXPLAIN (COSTS off, VERBOSE on) SELECT * FROM zips LIMIT 10;
 
 You'll need make and a full install of PostgreSQL 9.4, as well as [yajl](https://github.com/lloyd/yajl). The `scripts/bootstrap.sh` should be able to provide this for you.
 
+We use a fork of yajl at https://github.com/quasar-analytics/yajl, and the branch [yajl_reset](https://github.com/quasar-analytics/yajl/tree/yajl_reset).
+
 ### Development Testing
 
 Setup:

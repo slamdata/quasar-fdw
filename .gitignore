@@ -6,3 +6,4 @@ test/results/*
 *.so
 regression.*
 results/*
+quasar_fdw-*x86*

@@ -20,6 +20,7 @@ set -e
 ## Internal variables
 OS=
 OSTYPE=
+ARCH=
 DIR=
 LOG=
 TODO_PG_UPDATE=0
@@ -31,12 +32,13 @@ NOTEST=
 FN=$(basename $0)
 VERBOSE=0
 NO_FDW=
+USE_SOURCE=
 
 ## Configuration
 POSTGRES_VERSION_REGEX=9.4
 
 ## User-customizable variables
-FDWVERSION=${FDWVERSION:-v0.3.0}
+FDWVERSION=${FDWVERSION:-v1.0-rc1}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/yanatan16/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/yanatan16/quasar_fdw}
@@ -55,10 +57,15 @@ function install()
     if [[ "$TODO_PG_INSTALL" == "1" ]] || [[ "$TODO_PG_UPDATE" == "0" ]]; then
         install_postgres
     fi
-    install_builddeps
-    install_yajl
-    if [[ -z $NO_FDW ]]; then
-        install_fdw
+    if [[ -z "$USE_SOURCE" ]]; then can_use_binaries; fi
+    if [[ ! -z "$USE_SOURCE" ]]; then
+        install_builddeps
+        install_yajl
+        if [[ -z $NO_FDW ]]; then
+            install_fdw
+        fi
+    else
+        install_binaries
     fi
     mypopd
     cleanup
@@ -84,6 +91,25 @@ function test_current_postgres_install()
     else
         log "Your PostgreSQL install is up to date."
     fi
+}
+
+function can_use_binaries()
+{
+    TARBASE="quasar_fdw-${ARCH}-${PGVERSION}-${FDWVERSION}"
+    TAR="${FDWCLONEURL}/releases/download/${FDWVERSION}/${TARBASE}.tar.gz"
+    log "Querying for binaries: $TAR"
+    if [[ -z $(curl $TAR -XHEAD --head 2>/dev/null | grep "302 Found") ]]; then
+        USE_SOURCE=1
+    fi
+}
+
+function install_binaries()
+{
+    logx wget $TAR -O ${TARBASE}.tar.gz
+    logx tar xzvf ${TARBASE}.tar.gz
+    pushd ${TARBASE}
+    logx ./install.sh
+    popd
 }
 
 function install_fdw()
@@ -144,8 +170,9 @@ function install_builddeps()
 {
     case $OS in
         osx)
-            (logx brew install git make cmake) \
-                 || error "Couldn't install build dependencies"
+            if [[ -z $(which git) ]]; then logx brew install git; fi
+            if [[ -z $(which make) ]]; then logx brew install make; fi
+            if [[ -z $(which cmake) ]]; then logx brew install cmake; fi
             ;;
         debian)
             (logx sudo apt-get install -y git make cmake libcurl4-openssl-dev curl) \
@@ -215,6 +242,7 @@ function install_postgres()
         *)
             ;;
     esac
+    PGVERSION=$(pg_config --version | cut -d' ' -f2)
 }
 
 ##
@@ -236,6 +264,8 @@ function main()
 
 function figure_out_os()
 {
+    ARCH="$(uname)-$(uname -m)"
+
     case $(uname) in
         Darwin)
             OS=osx
@@ -297,6 +327,7 @@ function help()
     echo "Options:"
     echo " -h|--help                Show this message"
     echo " -v|--verboase            Print a lot of stuff"
+    echo " -s|--source              Force install from source"
     echo " -r|--requirements-only   Don't install the FDW itself"
     echo "Env Vars:"
     echo " FDWVERSION:  Quasar FDW Git Reference (Default: master)"
@@ -368,6 +399,9 @@ do
             ;;
         -r|--requirements-only)
             NO_FDW=1
+            ;;
+        -s|--source)
+            USE_SOURCE=1
             ;;
         "")
             ;;

@@ -19,8 +19,11 @@ MONGO_HOST ?= localhost
 MONGO_PORT ?= 27017
 MONGO_DB   ?= quasar
 QUASAR_DIR ?= ../quasar
+YAJL_DIR ?= ../yajl
 SCALA_VERSION ?= 2.11
 QUASAR_VERSION = $(shell cat $(QUASAR_DIR)/version.sbt | cut -d'=' -f2 | xargs)
+PLATFORM = $(shell uname | tr '[:upper:]' '[:lower:]')
+ARCH = $(shell uname -m)
 
 ## Quasar FDW Configuration
 
@@ -44,6 +47,9 @@ REGRESS_OPTS = --inputdir=test --outputdir=test \
 MODULE_big      = $(EXTENSION)
 OBJS         =  $(patsubst %.c,%.o,$(wildcard src/*.c))
 PG_CONFIG    = pg_config
+PGVERSION = $(shell $(PG_CONFIG) --version | cut -d' ' -f2)
+BUILDNAME = quasar_fdw-$(PLATFORM)-$(ARCH)-$(PGVERSION)-v$(EXTVERSION)
+
 
 all: sql/$(EXTENSION)--$(EXTVERSION).sql
 
@@ -73,3 +79,20 @@ build-quasar:
 
 start-quasar:
 	java -jar $(QUASAR_DIR)/web/target/scala-$(SCALA_VERSION)/web_$(SCALA_VERSION)-$(QUASAR_VERSION)-one-jar.jar -c test/quasar-config.json
+
+
+build-yajl:
+	cd $(YAJL_DIR) && ./configure
+	make -C $(YAJL_DIR) all
+
+clean-all: clean
+	rm -rf $(BUILDNAME) $(BUILDNAME).tar.gz
+
+## Tar up important files
+tar: clean build-yajl all
+	mkdir -p $(BUILDNAME) $(BUILDNAME)/$(EXTENSION)
+	cp -r $(YAJL_DIR)/build/yajl-* $(BUILDNAME)/yajl
+	cp -r sql doc $(EXTENSION).so $(EXTENSION).control $(BUILDNAME)/$(EXTENSION)
+	cp scripts/prebuild_install.sh $(BUILDNAME)/install.sh
+
+	tar -czvf $(BUILDNAME).tar.gz $(BUILDNAME)
