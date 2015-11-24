@@ -49,8 +49,8 @@ SELECT city,pop FROM smallzips WHERE pop % 2 = 1 ORDER BY city LIMIT 3;
 SELECT * FROM zipsloc ORDER BY loc[1] LIMIT 2;
           loc           
 ------------------------
- {-72.5676,42.050658}
- {-72.770588,42.051099}
+ {-73.456575,42.101153}
+ {-73.38251,42.334752}
 (2 rows)
 
 /* Test out json usage */
@@ -253,4 +253,21 @@ SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
 -------
   2384
 (1 row)
+
+/* Array subscripts push down correctly from 1-based to 0-based */
+SELECT loc FROM zipsloc WHERE loc[1] < 0 LIMIT 3;
+          loc           
+------------------------
+ {-72.622739,42.070206}
+ {-72.51565,42.377017}
+ {-72.108354,42.409698}
+(3 rows)
+
+SELECT loc FROM zipsloc WHERE loc[1+1] > 0 LIMIT 3;
+          loc           
+------------------------
+ {-72.622739,42.070206}
+ {-72.51565,42.377017}
+ {-72.108354,42.409698}
+(3 rows)
 

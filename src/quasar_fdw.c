@@ -717,7 +717,7 @@ quasarGetForeignPlan(PlannerInfo *root,
     List           *remote_exprs = NIL;
     List           *local_exprs = NIL;
     List           *params_list = NIL;
-    List           *retrieved_attrs;
+    List           *scan_tlist = NIL;
     StringInfoData  sql;
     ListCell       *lc;
 
@@ -776,7 +776,7 @@ quasarGetForeignPlan(PlannerInfo *root,
      */
     initStringInfo(&sql);
     deparseSelectSql(&sql, root, baserel, fpinfo->attrs_used,
-                     &retrieved_attrs, false);
+                     &scan_tlist, false);
     if (remote_conds)
         appendWhereClause(&sql, root, baserel, remote_conds,
                           true, &params_list);
@@ -789,8 +789,7 @@ quasarGetForeignPlan(PlannerInfo *root,
      * Build the fdw_private list that will be available to the executor.
      * Items in the list must match enum FdwScanPrivateIndex, above.
      */
-    fdw_private = list_make2(makeString(sql.data),
-                             retrieved_attrs);
+    fdw_private = list_make1(makeString(sql.data));
 
     elog(DEBUG1, "Making foreignscan with %d remote_conds and %d local_conds",
          list_length(remote_conds), list_length(local_exprs));
@@ -815,7 +814,7 @@ quasarGetForeignPlan(PlannerInfo *root,
                             scan_relid,
                             params_list,
                             fdw_private,
-                            NIL,        /* no custom tlist */
+                            scan_tlist,
                             remote_exprs);
 #endif  /* PG_VERSION_NUM */
 }
@@ -1159,7 +1158,6 @@ estimate_path_cost_size(PlannerInfo *root,
     List *remote_join_conds;
     List *local_join_conds;
     StringInfoData sql;
-    List       *retrieved_attrs;
     Selectivity local_sel;
     QualCost        local_cost;
 
@@ -1184,8 +1182,7 @@ estimate_path_cost_size(PlannerInfo *root,
          * that don't impact the row count like join or ordering
          **/
         initStringInfo(&sql);
-        deparseSelectSql(&sql, root, baserel, fpinfo->attrs_used,
-                         &retrieved_attrs, true);
+        deparseSelectSql(&sql, root, baserel, fpinfo->attrs_used, NULL, true);
         if (fpinfo->remote_conds)
             appendWhereClause(&sql, root, baserel, fpinfo->remote_conds,
                               true, NULL);

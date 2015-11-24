@@ -185,7 +185,7 @@ extern void deparseSelectSql(StringInfo buf,
                              PlannerInfo *root,
                              RelOptInfo *baserel,
                              Bitmapset *attrs_used,
-                             List **retrieved_attrs,
+                             List **scan_tlist,
                              bool sizeEstimate);
 extern void appendWhereClause(StringInfo buf,
                               PlannerInfo *root,

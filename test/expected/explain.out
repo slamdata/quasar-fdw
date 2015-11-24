@@ -204,12 +204,10 @@ EXPLAIN (COSTS off, VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY p
    [
      { "$match": { "state": "CO" } },
      { "$project": { "city": "$city", "pop": "$pop", "state": "$state" } },
-     { "$sort": { "pop": NumberInt(-1) } },
-     { "$out": "tmp.gen_0" }],
+     { "$sort": { "pop": NumberInt(-1) } }],
    { "allowDiskUse": true });
- db.tmp.gen_0.find();
  
-(13 rows)
+(11 rows)
 
 /* Timestamps and dates pushdown */
 EXPLAIN (COSTS off) SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIMIT 2;
@@ -283,4 +281,19 @@ EXPLAIN (COSTS off) SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
    ->  Foreign Scan on zips
          Quasar query: SELECT NULL FROM "zips" WHERE (("state"  IN (['CA', 'OR', 'WA'])))
 (3 rows)
+
+/* Array subscripts push down correctly from 1-based to 0-based */
+EXPLAIN (COSTS off) SELECT loc FROM zipsloc WHERE loc[1] < 0;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Foreign Scan on zipsloc
+   Quasar query: SELECT "loc" FROM "smallZips" WHERE ((("loc"[0]) < 0))
+(2 rows)
+
+EXPLAIN (COSTS off) SELECT loc FROM zipsloc WHERE loc[1+1] > 0;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Foreign Scan on zipsloc
+   Quasar query: SELECT "loc" FROM "smallZips" WHERE ((("loc"[1]) > 0))
+(2 rows)
 

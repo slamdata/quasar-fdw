@@ -78,12 +78,21 @@ static bool foreign_expr_walker(Node *node,
 /*
  * Functions to construct string representation of a node tree.
  */
+#if(PG_VERSION_NUM < 90500)
 static void deparseTargetList(StringInfo buf,
                               PlannerInfo *root,
                               Index rtindex,
                               Relation rel,
-                              Bitmapset *attrs_used,
-                              List **retrieved_attrs);
+                              Bitmapset *attrs_used);
+#else /* PG_VERSION_NUM < 90500 */
+static void deparsePushdownTargetList(StringInfo buf,
+                                      PlannerInfo *root,
+                                      Index rtindex,
+                                      Relation rel,
+                                      List *columnlist,
+                                      Bitmapset *attrs_used,
+                                      List **scan_tlist);
+#endif /* PG_VERSION_NUM < 90500 */
 static void deparseColumnRef(StringInfo buf, int varno, int varattno,
                              PlannerInfo *root, bool selector);
 static void deparseRelation(StringInfo buf, Relation rel);
@@ -717,7 +726,7 @@ deparseSelectSql(StringInfo buf,
                  PlannerInfo *root,
                  RelOptInfo *baserel,
                  Bitmapset *attrs_used,
-                 List **retrieved_attrs,
+                 List **scan_tlist,
                  bool sizeEstimate)
 {
     RangeTblEntry *rte = planner_rt_fetch(baserel->relid, root);
@@ -737,8 +746,13 @@ deparseSelectSql(StringInfo buf,
     if (sizeEstimate)
         appendStringInfoString(buf, "count(*)");
     else
-        deparseTargetList(buf, root, baserel->relid, rel, attrs_used,
-                          retrieved_attrs);
+#if(PG_VERSION_NUM >= 90500)
+        deparsePushdownTargetList(buf, root, baserel->relid, rel,
+                                  baserel->reltargetlist, attrs_used,
+                                  scan_tlist);
+#else /* PG_VERSION_NUM >= 90500 */
+        deparseTargetList(buf, root, baserel->relid, rel, attrs_used);
+#endif /* PG_VERSION_NUM >= 90500 */
 
     /*
      * Construct FROM clause
@@ -749,27 +763,27 @@ deparseSelectSql(StringInfo buf,
     heap_close(rel, NoLock);
 }
 
+#if(PG_VERSION_NUM >= 90500)
 /*
- * Emit a target list that retrieves the columns specified in attrs_used.
- * This is used for both SELECT and RETURNING targetlists.
+ * Emit a target list that retrieves the column expressions
+ * as supported by Quasar
  *
- * The tlist text is appended to buf, and we also create an integer List
- * of the columns being retrieved, which is returned to *retrieved_attrs.
+ * The tlist text is appended to buf
  */
 static void
-deparseTargetList(StringInfo buf,
-                  PlannerInfo *root,
-                  Index rtindex,
-                  Relation rel,
-                  Bitmapset *attrs_used,
-                  List **retrieved_attrs)
+deparsePushdownTargetList(StringInfo buf,
+                          PlannerInfo *root,
+                          Index rtindex,
+                          Relation rel,
+                          List *columnlist,
+                          Bitmapset *attrs_used,
+                          List **scan_tlist)
 {
+    ListCell       *lc;
     TupleDesc       tupdesc = RelationGetDescr(rel);
     bool            have_wholerow;
     bool            first;
-    int                     i;
-
-    *retrieved_attrs = NIL;
+    int             i;
 
     /* If there's a whole-row reference, we'll need all the columns. */
     have_wholerow = bms_is_member(0 - FirstLowInvalidHeapAttributeNumber,
@@ -794,7 +808,6 @@ deparseTargetList(StringInfo buf,
 
             deparseColumnRef(buf, rtindex, i, root, true);
 
-            *retrieved_attrs = lappend_int(*retrieved_attrs, i);
         }
     }
 
@@ -802,6 +815,59 @@ deparseTargetList(StringInfo buf,
     if (first)
         appendStringInfoString(buf, "NULL");
 }
+
+#else /* PG_VERSION_NUM >= 90500 */
+
+/*
+ * Emit a target list that retrieves the columns specified in attrs_used.
+ * This is used for both SELECT and RETURNING targetlists.
+ *
+ * The tlist text is appended to buf, and we also create an integer List
+ * of the columns being retrieved, which is returned to *retrieved_attrs.
+ */
+static void
+deparseTargetList(StringInfo buf,
+                  PlannerInfo *root,
+                  Index rtindex,
+                  Relation rel,
+                  Bitmapset *attrs_used)
+{
+    TupleDesc       tupdesc = RelationGetDescr(rel);
+    bool            have_wholerow;
+    bool            first;
+    int                     i;
+
+    /* If there's a whole-row reference, we'll need all the columns. */
+    have_wholerow = bms_is_member(0 - FirstLowInvalidHeapAttributeNumber,
+                                  attrs_used);
+
+    first = true;
+    for (i = 1; i <= tupdesc->natts; i++)
+    {
+        Form_pg_attribute attr = tupdesc->attrs[i - 1];
+
+        /* Ignore dropped attributes. */
+        if (attr->attisdropped)
+            continue;
+
+        if (have_wholerow ||
+            bms_is_member(i - FirstLowInvalidHeapAttributeNumber,
+                          attrs_used))
+        {
+            if (!first)
+                appendStringInfoString(buf, ", ");
+            first = false;
+
+            deparseColumnRef(buf, rtindex, i, root, true);
+        }
+    }
+
+    /* Don't generate bad syntax if no undropped columns */
+    if (first)
+        appendStringInfoString(buf, "NULL");
+}
+#endif /* PG_VERSION_NUM >= 90500 */
+
 
 /*
  * Deparse WHERE clauses in given list of RestrictInfos and append them to buf.
@@ -1671,7 +1737,11 @@ void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType)
     appendStringInfoChar(buf, '[');
 
     /* loop through the array elements */
+#if(PG_VERSION_NUM >= 90500)
+    iterator = array_create_iterator(DatumGetArrayTypeP(value), 0, NULL);
+#else
     iterator = array_create_iterator(DatumGetArrayTypeP(value), 0);
+#endif
     while (array_iterate(iterator, &datum, &isNull))
     {
         if (!first)
