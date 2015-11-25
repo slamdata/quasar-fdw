@@ -38,10 +38,10 @@ USE_SOURCE=
 POSTGRES_VERSION_REGEX=9.4
 
 ## User-customizable variables
-FDWVERSION=${FDWVERSION:-v1.0-rc2}
+FDWVERSION=${FDWVERSION:-v1.0-rc3}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/quasar-analytics/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
-FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar_fdw}
+FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar-fdw}
 
 ##
 ## Platform agnostic installation functions
