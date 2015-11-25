@@ -78,6 +78,10 @@ function run_regression()
                 --load-extension=quasar_fdw \
                 --load-language=plpgsql \
                 $TEST_FILES
+
+    if [[ -e $TEST_DIR/regression.diffs ]]; then
+        cat $TEST_DIR/regression.diffs
+    fi
 }
 
 function create_testfiles()

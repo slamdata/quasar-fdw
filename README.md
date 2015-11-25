@@ -180,6 +180,8 @@ scripts/cross-test.sh
 
 This will build the 5 docker images if necessary, start up the mongodb and quasar containers, then iteratively run the test images. Its a good way to test in different OSes.
 
+Note: This requires more memory than the basic vagrant docker box has, so if you see errors on the big test, thats why.
+
 ### Adding more pushdown features
 
 If [quasar](https://github.com/quasar-analytics/quasar) adds operators, it would be good to update this FDW to support pushdown of that operator. This can be done in the [quasar_query.c](src/quasar_query.c) file:
