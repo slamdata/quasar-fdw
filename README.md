@@ -10,7 +10,7 @@ For development installation, see [Development](#development).
 
 This version of quasar_fdw requires PostgreSQL 9.4.
 
-The `scripts/bootstrap.sh` will bootstrap the installation for you. It will install PostgreSQL 9.4 if it is not already installed, then it will download two libraries (a required json parser [yajl](https://github.com/lloyd/yajl) and this repository) and install both.
+The `scripts/bootstrap.sh` will bootstrap the installation for you. It will install PostgreSQL 9.4 if it is not already installed. Then, if your system has precompiled binaries available, it will simply download those. Otherwise, it will download two libraries (a required json parser [yajl](https://github.com/lloyd/yajl) and this repository) and install both.
 
 ```bash
 scripts/bootstrap.sh
