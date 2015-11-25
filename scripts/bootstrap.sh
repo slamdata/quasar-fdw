@@ -54,7 +54,7 @@ function install()
     mypushd $DIR
     ensure_requirements
     test_current_postgres_install
-    if [[ "$TODO_PG_INSTALL" == "1" ]] || [[ "$TODO_PG_UPDATE" == "0" ]]; then
+    if [[ "$TODO_PG_INSTALL" == "1" ]] || [[ "$TODO_PG_UPDATE" == "1" ]]; then
         install_postgres
     fi
     if [[ -z "$USE_SOURCE" ]]; then can_use_binaries; fi
@@ -82,10 +82,10 @@ function make_tempdir()
 
 function test_current_postgres_install()
 {
-    if [[ -z $(which postgres 2>/dev/null) ]]; then
+    if [[ -z $(which pg_config 2>/dev/null) ]]; then
         log "You do not have PostgreSQL. Installing..."
         TODO_PG_INSTALL=1
-    elif ! [[ $(postgres --version) =~ "$POSTGRES_VERSION_REGEX" ]]; then
+    elif ! [[ $(pg_config --version) =~ "$POSTGRES_VERSION_REGEX" ]]; then
         log "Your PostgreSQL install is out of date. It will be updated."
         TODO_PG_UPDATE=1
     else
@@ -95,6 +95,7 @@ function test_current_postgres_install()
 
 function can_use_binaries()
 {
+    PGVERSION=$(pg_config --version | cut -d' ' -f2)
     TARBASE="quasar_fdw-${ARCH}-${PGVERSION}-${FDWVERSION}"
     TAR="${FDWCLONEURL}/releases/download/${FDWVERSION}/${TARBASE}.tar.gz"
     log "Querying for binaries: $TAR"
@@ -115,11 +116,11 @@ function install_binaries()
 function install_fdw()
 {
     log "Installing Quasar FDW version $FDWVERSION"
-    (logx git clone $FDWCLONEURL "fdw_$FDWVERSION") \
-         || error "Clone of FDW respoitory failed"
-    mypushd "fdw_$FDWVERSION"
-    (logx git checkout $FDWVERSION) \
-        || error "Couldn't find Quasar FDW version $FDWVERSION"
+    (logx wget "$FDWCLONEURL/archive/$FDWVERSION.tar.gz" -O "quasar_fdw-$FDWVERSION.tar.gz") \
+        || error "Getting FDW repository failed"
+    (logx tar xzvf "quasar_fdw-$FDWVERSION.tar.gz") \
+        || error "Untaring FDW repository failed"
+    mypushd "quasar_fdw-*"
     (logx make install) \
         || error "Error installing Quasar FDW"
     mypopd
@@ -128,11 +129,11 @@ function install_fdw()
 function install_yajl()
 {
     log "Installing yajl version $YAJLVERSION"
-    (logx git clone "$YAJLCLONEURL" "yajl_$YAJLVERSION") \
-         || error "Clone of YAJL repository failed"
-    mypushd "yajl_$YAJLVERSION"
-    (logx git checkout $YAJLVERSION) \
-         || error "Couldn't find yajl version $YAJLVERSION"
+    (logx wget "$YAJLCLONEURL/archive/$YAJLVERSION.tar.gz" -O "yajl-$YAJLVERSION.tar.gz") \
+        || error "Getting YAJL repository failed"
+    (logx tar xzvf "yajl-$YAJLVERSION.tar.gz") \
+        || error "Untaring YAJL repository failed"
+    mypushd "yajl-*"
     (logx ./configure) \
         || error "Configuration of YAJL failed"
     (logx make clean install) \
@@ -145,8 +146,12 @@ function install_yajl()
 
 function cleanup()
 {
-    rm -rf "$DIR/fdw_$FDWVERSION"
-    rm -rf "$DIR/yajl_$YAJLVERSION"
+    if [[ -z "$USE_SOURCE" ]]; then
+        rm -rf "$DIR/quasar_fdw*"
+    else
+        rm -rf "$DIR/quasar_fdw-$FDWVERSION"
+        rm -rf "$DIR/yajl-$YAJLVERSION"
+    fi
 }
 
 ##
@@ -170,16 +175,15 @@ function install_builddeps()
 {
     case $OS in
         osx)
-            if [[ -z $(which git) ]]; then logx brew install git; fi
             if [[ -z $(which make) ]]; then logx brew install make; fi
             if [[ -z $(which cmake) ]]; then logx brew install cmake; fi
             ;;
         debian)
-            (logx sudo apt-get install -y git make cmake libcurl4-openssl-dev curl) \
+            (logx sudo apt-get install -y make cmake libcurl4-openssl-dev curl) \
                 || error "Couldn't install build dependencies"
             ;;
         centos)
-            (logx sudo yum install -y git make cmake libcurl-devel curl gcc) \
+            (logx sudo yum install -y make cmake libcurl-devel curl gcc) \
                 || error "Couldn't install build dependencies"
             ;;
         *)
@@ -242,7 +246,6 @@ function install_postgres()
         *)
             ;;
     esac
-    PGVERSION=$(pg_config --version | cut -d' ' -f2)
 }
 
 ##
@@ -264,7 +267,7 @@ function main()
 
 function figure_out_os()
 {
-    ARCH="$(uname)-$(uname -m)"
+    ARCH="$(uname | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 
     case $(uname) in
         Darwin)
