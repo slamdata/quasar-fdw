@@ -23,5 +23,24 @@ if [[ -z $1 ]]; then
     exit 1
 fi
 
+# Test for docker
+docker ps > /dev/null
+
+# Test for make
+make clean
+
 # Replace tag in .control file
-sed "s/default_version = .*/default_version = '$1'" quasar_fdw.control
+sed "s/default_version = .*/default_version = '$1'/" -i quasar_fdw.control
+
+# Replace tag in bootstrap.sh
+sed "s/FDWVERSION=.*/FDWVERSION=\${FDWVERSION:-v${1}}/" -i scripts/bootstrap.sh
+
+# Make tar file
+make tar
+
+# Make linux tar
+scripts/build_linux_release.sh
+
+git add .
+git commit -m "bump to $1"
+git tag "v$1"

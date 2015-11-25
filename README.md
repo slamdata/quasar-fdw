@@ -170,6 +170,16 @@ And to test:
 make install installcheck
 ```
 
+#### Cross-Platform Testing
+
+There are some dockerfiles in `docker/` which contain the setup to do cross-platform testing. It takes a while to execute, but you can run it with:
+
+```bash
+scripts/cross-test.sh
+```
+
+This will build the 5 docker images if necessary, start up the mongodb and quasar containers, then iteratively run the test images. Its a good way to test in different OSes.
+
 ### Adding more pushdown features
 
 If [quasar](https://github.com/quasar-analytics/quasar) adds operators, it would be good to update this FDW to support pushdown of that operator. This can be done in the [quasar_query.c](src/quasar_query.c) file:
@@ -189,6 +199,14 @@ If [quasar](https://github.com/quasar-analytics/quasar) adds operators, it would
 - Quasar (as of 2.2.3) doesn't have support for some constants such as intervals with years and months, or NaN
     - Because PostgreSQL supports these constants, they must be filtered outer
     - This can be changed in the `quasar_has_const` function
+
+### Releasing
+
+```bash
+scripts/release.sh <release version, eg 1.1.2>
+```
+
+This will replace the release version in the two places it goes (`quasar_fdw.control` and `scripts/bootstrap.sh`). Then it will build a tar with `make tar` for your local setup, then it will build a linux release with `scripts/build_linux_release.sh`, which uses docker.
 
 ## Legal
 

@@ -38,7 +38,7 @@ USE_SOURCE=
 POSTGRES_VERSION_REGEX=9.4
 
 ## User-customizable variables
-FDWVERSION=${FDWVERSION:-v1.0-rc1}
+FDWVERSION=${FDWVERSION:-v1.0-rc2}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/yanatan16/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/yanatan16/quasar_fdw}
