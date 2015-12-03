@@ -210,12 +210,10 @@ function install_postgres()
             (logx sudo apt-get install -y wget) \
                 || error "Couldn't install wget"
 
-            echo "deb http://apt.postgresql.org/pub/repos/apt/ ${OSVERSION}-pgdg main" \
-                 > /etc/apt/sources.list.d/pgdg.list
-            (logx wget --quiet -O - \
-                  https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-                  | sudo apt-key add -) \
-                || error "Couldn't get postgresql repo signing key"
+            sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ ${OSVERSION}-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+            (logx sudo wget --quiet https://www.postgresql.org/media/keys/ACCC4CF8.asc -O /tmp/ACCC4CF8.asc \
+                   && sudo apt-key add /tmp/ACCC4CF8.asc) \
+                  || error "Couldn't get postgresql repo signing key"
             logx sudo apt-get update
 
             (logx sudo apt-get install -y postgresql-9.4 \
