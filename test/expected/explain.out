@@ -275,11 +275,11 @@ EXPLAIN (COSTS off) SELECT count(*) FROM smallzips;
 (3 rows)
 
 EXPLAIN (COSTS off) SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
-                                        QUERY PLAN                                        
-------------------------------------------------------------------------------------------
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
  Aggregate
    ->  Foreign Scan on zips
-         Quasar query: SELECT NULL FROM "zips" WHERE (("state"  IN (['CA', 'OR', 'WA'])))
+         Quasar query: SELECT NULL FROM "zips" WHERE (("state"  IN ('CA', 'OR', 'WA')))
 (3 rows)
 
 /* Array subscripts push down correctly from 1-based to 0-based */
