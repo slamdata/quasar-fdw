@@ -271,3 +271,20 @@ SELECT loc FROM zipsloc WHERE loc[1+1] > 0 ORDER BY loc[2] LIMIT 3;
  {-73.320195,42.059552}
 (3 rows)
 
+/* Scalar Array ops */
+SELECT * FROM smallzips WHERE state IN ('MA', 'CA') ORDER BY city,pop LIMIT 3;
+   city   |  pop  | state 
+----------+-------+-------
+ ADAMS    |  9901 | MA
+ AGAWAM   | 15338 | MA
+ ASHFIELD |  1535 | MA
+(3 rows)
+
+SELECT * FROM smallzips WHERE state IN ('MA') ORDER BY city,pop LIMIT 3;
+   city   |  pop  | state 
+----------+-------+-------
+ ADAMS    |  9901 | MA
+ AGAWAM   | 15338 | MA
+ ASHFIELD |  1535 | MA
+(3 rows)
+

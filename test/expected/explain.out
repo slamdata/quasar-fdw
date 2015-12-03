@@ -297,3 +297,18 @@ EXPLAIN (COSTS off) SELECT loc FROM zipsloc WHERE loc[1+1] > 0;
    Quasar query: SELECT "loc" FROM "smallZips" WHERE ((("loc"[1]) > 0))
 (2 rows)
 
+/* Scalar array ops */
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state IN ('MA', 'CA');
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Foreign Scan on smallzips
+   Quasar query: SELECT "city", "pop", "state" FROM "smallZips" WHERE (("state"  IN ('MA', 'CA')))
+(2 rows)
+
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state IN ('MA');
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Foreign Scan on smallzips
+   Quasar query: SELECT "city", "pop", "state" FROM "smallZips" WHERE (("state" = 'MA'))
+(2 rows)
+
