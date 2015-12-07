@@ -43,7 +43,7 @@ FDWVERSION=${FDWVERSION:-v1.0-rc3}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/quasar-analytics/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar-fdw}
-QUASARJARURL=${QUASARJARURL:-https://github.com/quasar-analytics/quasar/releases/download/v2.3.3-SNAPSHOT-2126-web/web_2.11-2.3.3-SNAPSHOT-one-jar.jar}
+QUASARJARURL=${QUASARJARURL:-https://github.com/quasar-analytics/quasar/releases/download/v2.3.3-SNAPSHOT-2121-web/web_2.11-2.3.3-SNAPSHOT-one-jar.jar}
 
 ##
 ## Platform agnostic installation functions
