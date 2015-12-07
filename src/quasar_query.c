@@ -109,7 +109,7 @@ static void deparseRelabelType(RelabelType *node, deparse_expr_cxt *context);
 static void deparseBoolExpr(BoolExpr *node, deparse_expr_cxt *context);
 static void deparseNullTest(NullTest *node, deparse_expr_cxt *context);
 static void deparseArrayExpr(ArrayExpr *node, deparse_expr_cxt *context);
-static void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType);
+static void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType, bool use_set_syntax);
 static void printRemoteParam(int paramindex, Oid paramtype, int32 paramtypmod,
                              deparse_expr_cxt *context);
 static void printRemotePlaceholder(Oid paramtype, int32 paramtypmod,
@@ -648,6 +648,8 @@ bool quasar_has_scalar_array_op(ScalarArrayOpExpr *arrayoper, char **name) {
     char *opername;
     Oid schema;
     HeapTuple tuple;
+    Const *right;
+    ArrayType *a;
 
     /* get operator name, left argument type and schema */
     tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(arrayoper->opno));
@@ -660,6 +662,29 @@ bool quasar_has_scalar_array_op(ScalarArrayOpExpr *arrayoper, char **name) {
     ReleaseSysCache(tuple);
 
     if (schema != PG_CATALOG_NAMESPACE)
+        return false;
+
+    /* Accept only constant right sides */
+    if (list_length(arrayoper->args) != 2 ||
+        nodeTag((Node*) lsecond(arrayoper->args)) != T_Const)
+        return false;
+
+    right = (Const*) lsecond(arrayoper->args);
+
+    /* Accept only array constants */
+    if (getElementType(right->consttype,1) == right->consttype)
+        return false;
+
+    a = DatumGetArrayTypeP(right->constvalue);
+
+    /* Accept only 1-dimensional arrays */
+    if (ARR_NDIM(a) != 1)
+        return false;
+
+    /* BUG in Quasar: https://slamdata.atlassian.net/browse/SD-1045
+     * Quasar can't handle IN (single-value) or IN ()
+     */
+    if (ARR_DIMS(a)[0] < 2)
         return false;
 
     if ((strcmp(opername, "=") == 0 && arrayoper->useOr) || /* IN */
@@ -1368,13 +1393,14 @@ deparseScalarArrayOpExpr(ScalarArrayOpExpr *node, deparse_expr_cxt *context)
 {
     StringInfo buf = context->buf;
     Expr *arg1;
-    Expr *arg2;
+    Const *arg2;
     char *opname;
 
     quasar_has_scalar_array_op(node, &opname);
 
     /* Sanity check. */
     Assert(list_length(node->args) == 2);
+    Assert(nodeTag((Node*) lsecond(node->args)) == T_ArrayExpr);
 
     /* Always parenthesize the expression. */
     appendStringInfoChar(buf, '(');
@@ -1385,13 +1411,16 @@ deparseScalarArrayOpExpr(ScalarArrayOpExpr *node, deparse_expr_cxt *context)
     appendStringInfoChar(buf, ' ');
 
     /* Deparse operator name. */
-    appendStringInfo(buf, " %s (", opname);
+    appendStringInfo(buf, " %s ", opname);
 
     /* Deparse right operand. */
-    arg2 = lsecond(node->args);
-    deparseExpr(arg2, context);
+    arg2 = (Const*) lsecond(node->args);
 
-    appendStringInfoChar(buf, ')');
+    /* We dont use the normal deparseExpr here because we need
+     * special set syntax */
+    deparseArrayLiteral(buf, arg2->constvalue, arg2->consttype,
+                        getElementType(arg2->consttype, 1),
+                        true);
 
     /* Always parenthesize the expression. */
     appendStringInfoChar(buf, ')');
@@ -1471,7 +1500,7 @@ deparseArrayExpr(ArrayExpr *node, deparse_expr_cxt *context)
     bool            first = true;
     ListCell   *lc;
 
-    appendStringInfoString(buf, "[");
+    appendStringInfoChar(buf, '[');
     foreach(lc, node->elements)
     {
         if (!first)
@@ -1720,7 +1749,7 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
     {
         Oid elemType = getElementType(type, 1);
         if (elemType != type) {
-            deparseArrayLiteral(buf, value, type, elemType);
+            deparseArrayLiteral(buf, value, type, elemType, false);
         } else {
             deparseStringLiteral(buf, svalue);
         }
@@ -1729,7 +1758,7 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
     }
 }
 
-void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType)
+void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType, bool use_set_syntax)
 {
     ArrayIterator iterator;
     bool first = true;
@@ -1741,7 +1770,7 @@ void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType)
 
     getTypeOutputInfo(elemType, &typoutput, &typIsVarlena);
 
-    appendStringInfoChar(buf, '[');
+    appendStringInfoChar(buf, use_set_syntax ? '(' : '[');
 
     /* loop through the array elements */
 #if(PG_VERSION_NUM >= 90500)
@@ -1767,5 +1796,5 @@ void deparseArrayLiteral(StringInfo buf, Datum value, Oid type, Oid elemType)
     }
     array_free_iterator(iterator);
 
-    appendStringInfoChar(buf, ']');
+    appendStringInfoChar(buf, use_set_syntax ? ')' : ']');
 }

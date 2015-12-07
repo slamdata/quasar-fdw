@@ -28,7 +28,6 @@ char * execute_info_curl(QuasarConn *conn, char *url);
 static size_t header_handler(void *buffer, size_t size, size_t nmemb, void *buf);
 static size_t query_body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 static size_t info_body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
-static size_t throwaway_body_handler(void *buffer, size_t size, size_t nmemb, void *userp);
 static size_t count_line_endings(const char *buffer, size_t size);
 void appendStringInfoQuery(CURL *curl,
                            StringInfo buf,
@@ -36,10 +35,7 @@ void appendStringInfoQuery(CURL *curl,
                            const char *value,
                            bool is_first);
 
-void QuasarExecuteQueryGet(QuasarConn *conn, char *query);
-void QuasarExecuteQueryPost(QuasarConn *conn, char *query,
-                            const char **param_values, size_t numParams);
-void QuasarDeletePostData(QuasarConn *conn);
+void QuasarExecuteQueryGet(QuasarConn *conn, char *query, const char **param_values, size_t numParams);
 
 extern void
 QuasarGlobalConnectionInit()
@@ -80,7 +76,6 @@ QuasarGetConnection(ForeignServer *server)
     conn->curlm = NULL;
     conn->curl = curl_easy_init();
 
-    conn->post_path = NULL;
     conn->ongoing_transfers = 0;
     conn->exec_transfer = 0;
 
@@ -108,11 +103,6 @@ QuasarPrepQuery(QuasarConn *conn, EState *estate, Relation rel)
 extern void
 QuasarCleanupConnection(QuasarConn *conn)
 {
-    if (conn->post_path != NULL)
-    {
-        QuasarDeletePostData(conn);
-    }
-
     if (conn->curlm != NULL) {
         curl_multi_remove_handle(conn->curlm, conn->curl);
         curl_multi_cleanup(conn->curlm);
@@ -132,11 +122,6 @@ QuasarCleanupConnection(QuasarConn *conn)
 extern void
 QuasarResetConnection(QuasarConn *conn)
 {
-    if (conn->post_path != NULL)
-    {
-        QuasarDeletePostData(conn);
-    }
-
     if (conn->curlm != NULL) {
         curl_multi_remove_handle(conn->curlm, conn->curl);
     }
@@ -152,10 +137,7 @@ extern void
 QuasarExecuteQuery(QuasarConn *conn, char *query,
                    const char **param_values, size_t numParams)
 {
-    if (numParams > 0)
-        QuasarExecuteQueryPost(conn, query, param_values, numParams);
-    else
-        QuasarExecuteQueryGet(conn, query);
+    QuasarExecuteQueryGet(conn, query, param_values, numParams);
 
     conn->ongoing_transfers = 1;
     conn->exec_transfer = 1;
@@ -171,101 +153,26 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
 }
 
 void
-QuasarExecuteQueryGet(QuasarConn *conn, char *query)
-{
-    int sc;
-    CURL *curl = conn->curl;
-    CURLM *curlm = conn->curlm;
-    StringInfoData url;
-
-    initStringInfo(&url);
-    appendStringInfo(&url, "%s/query/fs%s", conn->server, conn->path);
-    appendStringInfoQuery(curl, &url, "q", query, true);
-    conn->full_url = url.data;
-
-    curl_easy_setopt(curl, CURLOPT_URL, url.data);
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, conn->qctx);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, query_body_handler);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, conn->qctx);
-
-    sc = curl_multi_add_handle(curlm, curl);
-    if (sc != CURLM_OK)
-    {
-        QuasarCleanupConnection(conn);
-        elog(ERROR, "quasar_fdw: curl add handle failed %s", curl_multi_strerror(sc));
-    }
-
-
-}
-
-void
-QuasarExecuteQueryPost(QuasarConn *conn, char *query,
-                       const char **param_values, size_t numParams)
+QuasarExecuteQueryGet(QuasarConn *conn, char *query,
+                      const char **param_values, size_t numParams)
 {
     int sc, i;
-    CURL *curl = curl_easy_init();
+    CURL *curl = conn->curl;
     CURLM *curlm = conn->curlm;
-    StringInfoData url;
-    StringInfoData param;
-    StringInfoData dest;
-    quasar_info_curl_context infoctx;
-    struct curl_slist *headers = NULL;
+    StringInfoData url, param;
 
-    Assert(conn->curlm != NULL && conn->qctx != NULL);
-
-    /* Build URL */
     initStringInfo(&url);
     initStringInfo(&param);
+
     appendStringInfo(&url, "%s/query/fs%s", conn->server, conn->path);
+    appendStringInfoQuery(curl, &url, "q", query, true);
 
     for (i = 0; i < numParams; ++i) {
         resetStringInfo(&param);
-        appendStringInfo(&param, "p%d", i+1);
-        appendStringInfoQuery(curl, &url, param.data, param_values[i], i == 0);
+        appendStringInfo(&param, "var.p%d", i+1);
+        appendStringInfoQuery(curl, &url, param.data, param_values[i], false);
     }
 
-    initStringInfo(&dest);
-    appendStringInfo(&dest, "%s/fdw_%d", conn->path, rand());
-    conn->post_path = pstrdup(dest.data);
-    resetStringInfo(&dest);
-    appendStringInfo(&dest, "Destination: %s", conn->post_path);
-    headers = curl_slist_append(headers, dest.data);
-
-    /* Set up CURL instance. */
-    curl_easy_setopt(curl, CURLOPT_URL, url.data);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, query);
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &infoctx);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, throwaway_body_handler);
-
-    elog(DEBUG1, "curling %s with query %s", url.data, query);
-    sc = curl_easy_perform(curl);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (sc != CURLE_OK)
-    {
-        QuasarCleanupConnection(conn);
-        elog(ERROR, "quasar_fdw: curl %s failed: %s",
-             url.data, curl_easy_strerror(sc));
-    }
-
-    if (infoctx.status != 200)
-    {
-        QuasarCleanupConnection(conn);
-        elog(ERROR, "quasar_fdw: Got bad response from quasar: %d (%s)",
-             infoctx.status, url.data);
-    }
-
-    /* Ok now we go get the data */
-    curl = conn->curl;
-
-    resetStringInfo(&url);
-    appendStringInfo(&url, "%s/data/fs%s", conn->server, conn->post_path);
     conn->full_url = url.data;
 
     curl_easy_setopt(curl, CURLOPT_URL, url.data);
@@ -275,12 +182,15 @@ QuasarExecuteQueryPost(QuasarConn *conn, char *query,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, query_body_handler);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, conn->qctx);
 
+    elog(DEBUG1, "quasar_fdw: curling %s", url.data);
     sc = curl_multi_add_handle(curlm, curl);
     if (sc != CURLM_OK)
     {
         QuasarCleanupConnection(conn);
         elog(ERROR, "quasar_fdw: curl add handle failed %s", curl_multi_strerror(sc));
     }
+
+
 }
 
 extern void
@@ -340,45 +250,6 @@ QuasarRewindQuery(QuasarConn *conn)
 
     /* Otherwise, we have to reset the whole connection */
     QuasarResetConnection(conn);
-}
-
-void
-QuasarDeletePostData(QuasarConn *conn)
-{
-    int cc;
-    quasar_info_curl_context ctx;
-    CURL *curl = curl_easy_init();
-    StringInfoData url;
-
-    ctx.status = 0;
-
-    initStringInfo(&url);
-    appendStringInfo(&url, "%s/data/fs%s", conn->server, conn->post_path);
-    conn->post_path = NULL;
-
-    curl_easy_setopt(curl, CURLOPT_URL, url.data);
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_handler);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, throwaway_body_handler);
-
-    elog(DEBUG1, "curling DELETE %s", url.data);
-    cc = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-
-    if (cc != CURLE_OK)
-    {
-        QuasarCleanupConnection(conn);
-        elog(ERROR, "quasar_fdw: curl DELETE %s failed %s",
-             url.data, curl_easy_strerror(cc));
-    }
-
-    if (ctx.status != 200)
-    {
-        QuasarCleanupConnection(conn);
-        elog(ERROR, "quasar_fdw: got bad response from quasar: %d (DELETE %s)",
-             ctx.status, url.data);
-    }
 }
 
 extern char *
@@ -484,12 +355,6 @@ header_handler(void *buffer, size_t size, size_t nmemb, void *userp)
     }
 
     return segsize;
-}
-
-static size_t
-throwaway_body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
-{
-    return size * nmemb;
 }
 
 static size_t

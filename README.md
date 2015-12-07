@@ -4,6 +4,10 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 The main advantage of using this FDW over alternatives is that it takes full advantage of the Quasar query engine by "pushing down" as many clauses from the PostgreSQL query to Quasar as possible. This includes WHERE, ORDER BY, and JOIN clauses.
 
+Latest Version: `v1.0rc4`
+Required Quasar Version: `2.3.3-SNAPSHOT`
+Required PostgreSQL Version: `9.4`
+
 ## Install
 
 For development installation, see [Development](#development).

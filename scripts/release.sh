@@ -35,6 +35,9 @@ sed "s/default_version = .*/default_version = '$1'/" -i quasar_fdw.control
 # Replace tag in bootstrap.sh
 sed "s/FDWVERSION=.*/FDWVERSION=\${FDWVERSION:-v${1}}/" -i scripts/bootstrap.sh
 
+# Replace tag in README
+sed "s/Lastest Version:.*/Latest Version: \`v${1}\`/" -i README.md
+
 # Make tar file
 make tar
 

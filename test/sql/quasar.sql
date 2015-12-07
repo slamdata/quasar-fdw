@@ -61,3 +61,6 @@ SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
 /* Array subscripts push down correctly from 1-based to 0-based */
 SELECT loc FROM zipsloc WHERE loc[1] < 0 ORDER BY loc[1] LIMIT 3;
 SELECT loc FROM zipsloc WHERE loc[1+1] > 0 ORDER BY loc[2] LIMIT 3;
+/* Scalar Array ops */
+SELECT * FROM smallzips WHERE state IN ('MA', 'CA') ORDER BY city,pop LIMIT 3;
+SELECT * FROM smallzips WHERE state IN ('MA') ORDER BY city,pop LIMIT 3;

@@ -27,7 +27,7 @@ ARCH = $(shell uname -m)
 
 ## Quasar FDW Configuration
 
-PG_CPPFLAGS = -std=c99 -g
+PG_CPPFLAGS = -std=c99
 CURL_LIB = $(shell curl-config --libs)
 MY_LIBS = $(CURL_LIB) -lyajl
 SHLIB_LINK = $(MY_LIBS)

@@ -63,3 +63,6 @@ EXPLAIN (COSTS off) SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
 /* Array subscripts push down correctly from 1-based to 0-based */
 EXPLAIN (COSTS off) SELECT loc FROM zipsloc WHERE loc[1] < 0;
 EXPLAIN (COSTS off) SELECT loc FROM zipsloc WHERE loc[1+1] > 0;
+/* Scalar array ops */
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state IN ('MA', 'CA');
+EXPLAIN (COSTS off) SELECT * FROM smallzips WHERE state IN ('MA');
