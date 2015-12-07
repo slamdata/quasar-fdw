@@ -39,7 +39,7 @@ NO_QUASAR=1
 POSTGRES_VERSION_REGEX=9.4
 
 ## User-customizable variables
-FDWVERSION=${FDWVERSION:-v1.0-rc3}
+FDWVERSION=${FDWVERSION:-v1.0rc4}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/quasar-analytics/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar-fdw}
@@ -219,7 +219,7 @@ function install_postgres()
             (logx sudo apt-get install -y wget) \
                 || error "Couldn't install wget"
 
-            sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ ${OSVERSION}-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+            sudo sh -c "echo \"deb http://apt.postgresql.org/pub/repos/apt/ ${OSVERSION}-pgdg main\" > /etc/apt/sources.list.d/pgdg.list"
             (logx sudo wget --quiet https://www.postgresql.org/media/keys/ACCC4CF8.asc -O /tmp/ACCC4CF8.asc \
                    && sudo apt-key add /tmp/ACCC4CF8.asc) \
                   || error "Couldn't get postgresql repo signing key"
