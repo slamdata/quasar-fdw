@@ -33,6 +33,7 @@ FN=$(basename $0)
 VERBOSE=0
 NO_FDW=
 USE_SOURCE=
+NO_QUASAR=1
 
 ## Configuration
 POSTGRES_VERSION_REGEX=9.4
@@ -42,6 +43,7 @@ FDWVERSION=${FDWVERSION:-v1.0-rc3}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/quasar-analytics/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar-fdw}
+QUASARJARURL=${QUASARJARURL:-https://github.com/quasar-analytics/quasar/releases/download/v2.3.3-SNAPSHOT-2126-web/web_2.11-2.3.3-SNAPSHOT-one-jar.jar}
 
 ##
 ## Platform agnostic installation functions
@@ -67,6 +69,7 @@ function install()
     else
         install_binaries
     fi
+    install_quasar
     mypopd
     cleanup
     log "Install is successful!"
@@ -169,6 +172,12 @@ function ensure_requirements()
         *)
             ;;
     esac
+
+    if [[ ! -z $NO_QUASAR ]]; then
+        if [[ -z $(which java) ]]; then
+            error "Java is required to run quasar"
+        fi
+    fi
 }
 
 function install_builddeps()
@@ -244,6 +253,17 @@ function install_postgres()
         *)
             ;;
     esac
+}
+
+function install_quasar() {
+    loc=/opt/quasar/$(basename ${QUASARJARURL})
+    sudo mkdir -p /opt/quasar
+    logx sudo wget ${QUASARJARURL} -O $loc
+    log "***"
+    log "Quasar JAR has been downloaded to $loc"
+    log "Run with \`java -jar $loc -c <config_file>\`"
+    log "See https://github.com/quasar-analytics/quasar/blob/master/example-quasar-config.json"
+    log "***"
 }
 
 ##
@@ -330,6 +350,7 @@ function help()
     echo " -v|--verboase            Print a lot of stuff"
     echo " -s|--source              Force install from source"
     echo " -r|--requirements-only   Don't install the FDW itself"
+    echo " -q|--with-quasar         Download matching Quasar version"
     echo "Env Vars:"
     echo " FDWVERSION:  Quasar FDW Git Reference (Default: master)"
     echo " YAJLVERSION: Yajl Git Reference (Default: yajl_reset)"
@@ -403,6 +424,9 @@ do
             ;;
         -s|--source)
             USE_SOURCE=1
+            ;;
+        --with-quasar)
+            NO_QUASAR=
             ;;
         "")
             ;;
