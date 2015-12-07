@@ -173,7 +173,7 @@ function ensure_requirements()
             ;;
     esac
 
-    if [[ ! -z $NO_QUASAR ]]; then
+    if [[ -z $NO_QUASAR ]]; then
         if [[ -z $(which java) ]]; then
             error "Java is required to run quasar"
         fi
