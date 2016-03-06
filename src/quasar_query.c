@@ -1700,7 +1700,7 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
         if (timestamp2tm(date2timestamp_no_overflow(DatumGetDateADT(value)),
                          NULL, &tm, &fsec, NULL, NULL))
         {
-            elog(ERROR, "quasar_dw: Couldn't convert date value to pg_tm struct");
+            elog(ERROR, "quasar_fdw: Couldn't convert date value to pg_tm struct");
         }
         appendStringInfo(buf, "DATE(\"%04d-%02d-%02d\")",
                          tm.tm_year, tm.tm_mon, tm.tm_mday);
