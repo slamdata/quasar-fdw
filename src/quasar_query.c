@@ -1043,7 +1043,7 @@ deparseStringLiteral(StringInfo buf, const char *val)
 {
     const char *valptr;
 
-    appendStringInfoChar(buf, '\'');
+    appendStringInfoChar(buf, '"');
     for (valptr = val; *valptr; valptr++)
     {
         char            ch = *valptr;
@@ -1052,7 +1052,7 @@ deparseStringLiteral(StringInfo buf, const char *val)
             appendStringInfoChar(buf, ch);
         appendStringInfoChar(buf, ch);
     }
-    appendStringInfoChar(buf, '\'');
+    appendStringInfoChar(buf, '"');
 }
 
 /*
@@ -1613,27 +1613,27 @@ quasar_quote_identifier(const char *s) {
             case '[':
                 state = QUOTE_STATE_IN_ARRAYREF;
                 break;
-            case '"':
+            case '`':
                 /* User self-quoting */
                 state = QUOTE_STATE_IN_QUOTE;
                 break;
             default:
                 /* We have encountered a token to quote */
                 state = QUOTE_STATE_IN_QUOTE;
-                appendStringInfoChar(&buf, '"');
+                appendStringInfoChar(&buf, '`');
             }
             break;
         case QUOTE_STATE_IN_QUOTE:
             switch(*s) {
             case '.':
                 state = QUOTE_STATE_DEFAULT;
-                appendStringInfoChar(&buf, '"');
+                appendStringInfoChar(&buf, '`');
                 break;
             case '[':
                 state = QUOTE_STATE_IN_ARRAYREF;
-                appendStringInfoChar(&buf, '"');
+                appendStringInfoChar(&buf, '`');
                 break;
-            case '"':
+            case '`':
                 state = QUOTE_STATE_DEFAULT;
                 break;
             }
@@ -1650,7 +1650,7 @@ quasar_quote_identifier(const char *s) {
     }
 
     if (state == QUOTE_STATE_IN_QUOTE)
-        appendStringInfoChar(&buf, '"');
+        appendStringInfoChar(&buf, '`');
 
     return buf.data;
 }
@@ -1689,7 +1689,7 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
         break;
     case TIMEOID:
     {
-        appendStringInfo(buf, "(TIME '%s')", svalue);
+        appendStringInfo(buf, "TIME(\"%s\")", svalue);
     }
     break;
     case DATEOID:
@@ -1700,9 +1700,9 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
         if (timestamp2tm(date2timestamp_no_overflow(DatumGetDateADT(value)),
                          NULL, &tm, &fsec, NULL, NULL))
         {
-            elog(ERROR, "quasar_fdw: Couldn't convert date value to pg_tm struct");
+            elog(ERROR, "quasar_dw: Couldn't convert date value to pg_tm struct");
         }
-        appendStringInfo(buf, "(DATE '%04d-%02d-%02d')",
+        appendStringInfo(buf, "DATE(\"%04d-%02d-%02d\")",
                          tm.tm_year, tm.tm_mon, tm.tm_mday);
     }
     break;
@@ -1716,7 +1716,7 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
             elog(ERROR, "quasar_fdw: Couldn't convert timestamp to pg_tm struct");
         }
 
-        appendStringInfo(buf, "(TIMESTAMP '%04d-%02d-%02dT%02d:%02d:%02dZ')",
+        appendStringInfo(buf, "TIMESTAMP(\"%04d-%02d-%02dT%02d:%02d:%02dZ\")",
                          tm.tm_year, tm.tm_mon, tm.tm_mday,
                          tm.tm_hour, tm.tm_min, tm.tm_sec);
     }
@@ -1725,7 +1725,7 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
     {
         pg_time_t tt = timestamptz_to_time_t(DatumGetTimestampTz(value));
         struct pg_tm *tm = pg_gmtime(&tt);
-        appendStringInfo(buf, "(TIMESTAMP '%04d-%02d-%02dT%02d:%02d:%02dZ')",
+        appendStringInfo(buf, "TIMESTAMP(\"%04d-%02d-%02dT%02d:%02d:%02dZ\")",
                          tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
                          tm->tm_hour, tm->tm_min, tm->tm_sec);
     }
@@ -1741,7 +1741,7 @@ deparseLiteral(StringInfo buf, Oid type, const char *svalue, Datum value)
             elog(ERROR, "quasar_fdw: Couldn't convert interval to pg_tm struct");
         }
 
-        appendStringInfo(buf, "(INTERVAL 'P%dDT%dH%dM%dS')",
+        appendStringInfo(buf, "INTERVAL(\"P%dDT%dH%dM%dS\")",
                          tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
     }
     break;
