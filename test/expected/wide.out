@@ -7,7 +7,7 @@ CREATE FOREIGN TABLE wide_comments
 ,comment_text varchar OPTIONS (map 'comments[*].text')
 ,comment_reply_to_profile integer OPTIONS (map 'comments[*].replyTo[0]')
 ,comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
-,comment_time date OPTIONS (map 'comments[*]."time"')
+,comment_time varchar OPTIONS (map 'comments[*]."time"')
 ,a1user_id integer OPTIONS (map 'userId')
 ,a1profile_name varchar OPTIONS (map 'profile.name')
 ,a1age integer OPTIONS (map 'profile.age')
@@ -16,7 +16,7 @@ CREATE FOREIGN TABLE wide_comments
 ,a1comment_text varchar OPTIONS (map 'comments[*].text')
 ,a1comment_reply_to_profile integer OPTIONS (map 'comments[*].replyTo[0]')
 ,a1comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
-,a1comment_time date OPTIONS (map 'comments[*]."time"')
+,a1comment_time varchar OPTIONS (map 'comments[*]."time"')
 ,a2user_id integer OPTIONS (map 'userId')
 ,a2profile_name varchar OPTIONS (map 'profile.name')
 ,a2age integer OPTIONS (map 'profile.age')
@@ -25,7 +25,7 @@ CREATE FOREIGN TABLE wide_comments
 ,a2comment_text varchar OPTIONS (map 'comments[*].text')
 ,a2comment_reply_to_profile integer OPTIONS (map 'comments[*].replyTo[0]')
 ,a2comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
-,a2comment_time date OPTIONS (map 'comments[*]."time"')
+,a2comment_time varchar OPTIONS (map 'comments[*]."time"')
 ,a3user_id integer OPTIONS (map 'userId')
 ,a3profile_name varchar OPTIONS (map 'profile.name')
 ,a3age integer OPTIONS (map 'profile.age')
@@ -34,7 +34,7 @@ CREATE FOREIGN TABLE wide_comments
 ,a3comment_text varchar OPTIONS (map 'comments[*].text')
 ,a3comment_reply_to_profile integer OPTIONS (map 'comments[*].replyTo[0]')
 ,a3comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
-,a3comment_time date OPTIONS (map 'comments[*]."time"')
+,a3comment_time varchar OPTIONS (map 'comments[*]."time"')
 ,a4user_id integer OPTIONS (map 'userId')
 ,a4profile_name varchar OPTIONS (map 'profile.name')
 ,a4age integer OPTIONS (map 'profile.age')
@@ -43,13 +43,13 @@ CREATE FOREIGN TABLE wide_comments
 ,a4comment_text varchar OPTIONS (map 'comments[*].text')
 ,a4comment_reply_to_profile integer OPTIONS (map 'comments[*].replyTo[0]')
 ,a4comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
-,a4comment_time date OPTIONS (map 'comments[*]."time"'))
+,a4comment_time varchar OPTIONS (map 'comments[*]."time"'))
 SERVER quasar OPTIONS (table 'user_comments');
 /* Now select from this wide table */
 SELECT * FROM wide_comments;
  user_id | profile_name | age | title | comment_id | comment_text | comment_reply_to_profile | comment_reply_to_comment | comment_time | a1user_id | a1profile_name | a1age | a1title | a1comment_id | a1comment_text | a1comment_reply_to_profile | a1comment_reply_to_comment | a1comment_time | a2user_id | a2profile_name | a2age | a2title | a2comment_id | a2comment_text | a2comment_reply_to_profile | a2comment_reply_to_comment | a2comment_time | a3user_id | a3profile_name | a3age | a3title | a3comment_id | a3comment_text | a3comment_reply_to_profile | a3comment_reply_to_comment | a3comment_time | a4user_id | a4profile_name | a4age | a4title | a4comment_id | a4comment_text | a4comment_reply_to_profile | a4comment_reply_to_comment | a4comment_time 
 ---------+--------------+-----+-------+------------+--------------+--------------------------+--------------------------+--------------+-----------+----------------+-------+---------+--------------+----------------+----------------------------+----------------------------+----------------+-----------+----------------+-------+---------+--------------+----------------+----------------------------+----------------------------+----------------+-----------+----------------+-------+---------+--------------+----------------+----------------------------+----------------------------+----------------+-----------+----------------+-------+---------+--------------+----------------+----------------------------+----------------------------+----------------
- 8927524 | Mary Jane    |  29 | Dr    | F2372BAC   | I concur.    |                  9817361 | F8ACD164F                | 02-03-2015   |   8927524 | Mary Jane      |    29 | Dr      | F2372BAC     | I concur.      |                    9817361 | F8ACD164F                  | 02-03-2015     |   8927524 | Mary Jane      |    29 | Dr      | F2372BAC     | I concur.      |                    9817361 | F8ACD164F                  | 02-03-2015     |   8927524 | Mary Jane      |    29 | Dr      | F2372BAC     | I concur.      |                    9817361 | F8ACD164F                  | 02-03-2015     |   8927524 | Mary Jane      |    29 | Dr      | F2372BAC     | I concur.      |                    9817361 | F8ACD164F                  | 02-03-2015
- 8927524 | Mary Jane    |  29 | Dr    | GH732AFC   | NA           |                  9654726 | A44124F                  | 03-01-2015   |   8927524 | Mary Jane      |    29 | Dr      | GH732AFC     | NA             |                    9654726 | A44124F                    | 03-01-2015     |   8927524 | Mary Jane      |    29 | Dr      | GH732AFC     | NA             |                    9654726 | A44124F                    | 03-01-2015     |   8927524 | Mary Jane      |    29 | Dr      | GH732AFC     | NA             |                    9654726 | A44124F                    | 03-01-2015     |   8927524 | Mary Jane      |    29 | Dr      | GH732AFC     | NA             |                    9654726 | A44124F                    | 03-01-2015
+ 8927524 | Mary Jane    |  29 | Dr    | F2372BAC   | I concur.    |                  9817361 | F8ACD164F                | NA           |   8927524 | Mary Jane      |    29 | Dr      | F2372BAC     | I concur.      |                    9817361 | F8ACD164F                  | NA             |   8927524 | Mary Jane      |    29 | Dr      | F2372BAC     | I concur.      |                    9817361 | F8ACD164F                  | NA             |   8927524 | Mary Jane      |    29 | Dr      | F2372BAC     | I concur.      |                    9817361 | F8ACD164F                  | NA             |   8927524 | Mary Jane      |    29 | Dr      | F2372BAC     | I concur.      |                    9817361 | F8ACD164F                  | NA
+ 8927524 | Mary Jane    |  29 | Dr    | GH732AFC   | NA           |                  9654726 | A44124F                  | NA           |   8927524 | Mary Jane      |    29 | Dr      | GH732AFC     | NA             |                    9654726 | A44124F                    | NA             |   8927524 | Mary Jane      |    29 | Dr      | GH732AFC     | NA             |                    9654726 | A44124F                    | NA             |   8927524 | Mary Jane      |    29 | Dr      | GH732AFC     | NA             |                    9654726 | A44124F                    | NA             |   8927524 | Mary Jane      |    29 | Dr      | GH732AFC     | NA             |                    9654726 | A44124F                    | NA
 (2 rows)
 
