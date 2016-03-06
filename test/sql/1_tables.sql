@@ -17,7 +17,7 @@ CREATE FOREIGN TABLE zips_bad(loc float) -- BAD Field type
 CREATE FOREIGN TABLE zips_convert(pop integer, loc0 float OPTIONS (map 'loc[0]'))
        SERVER quasar OPTIONS (table 'smallZips');
 CREATE FOREIGN TABLE commits
-       (ts timestamp OPTIONS (map 'commit.author."date"', nopushdown 'true')
+       (ts timestamp OPTIONS (map 'commit.author.`date`', nopushdown 'true')
        ,sha varchar
        ,author_name varchar OPTIONS (map 'commit.author.name')
        ,author_email varchar OPTIONS (map 'commit.author.email')
@@ -52,7 +52,7 @@ CREATE FOREIGN TABLE user_comments
        ,comment_text varchar OPTIONS (map 'comments[*].text')
        ,comment_reply_to_profile integer OPTIONS (map 'comments[*].replyTo[0]')
        ,comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
-       ,comment_time date OPTIONS (map 'comments[*]."time"'))
+       ,comment_time date OPTIONS (map 'comments[*].`time`'))
        SERVER quasar OPTIONS (table 'user_comments');
 CREATE FOREIGN TABLE zips_re(city varchar OPTIONS (join_rowcount_estimate '1')
                             ,pop integer

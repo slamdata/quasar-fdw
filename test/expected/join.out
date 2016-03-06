@@ -9,11 +9,11 @@ EXPLAIN (COSTS off) SELECT * FROM zips_re z1, zips_re z2 WHERE z1.city = z2.city
    ->  Sort
          Sort Key: z1.city
          ->  Foreign Scan on zips_re z1
-               Quasar query: SELECT "city", "pop", "state" FROM "zips"
+               Quasar query: SELECT `city`, `pop`, `state` FROM `zips`
    ->  Sort
          Sort Key: z2.city
          ->  Foreign Scan on zips_re z2
-               Quasar query: SELECT "city", "pop", "state" FROM "zips"
+               Quasar query: SELECT `city`, `pop`, `state` FROM `zips`
 (10 rows)
 
 SELECT * FROM zips_re z1, zips_re z2 WHERE z1.city = z2.city ORDER BY z1.city, z1.pop LIMIT 10;
@@ -38,10 +38,10 @@ EXPLAIN (COSTS off) SELECT * FROM zips_re z1, zips_re z2 WHERE z1.pop > 60000 AN
  Hash Join
    Hash Cond: ((z2.city)::text = (z1.city)::text)
    ->  Foreign Scan on zips_re z2
-         Quasar query: SELECT "city", "pop", "state" FROM "zips"
+         Quasar query: SELECT `city`, `pop`, `state` FROM `zips`
    ->  Hash
          ->  Foreign Scan on zips_re z1
-               Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("pop" > 60000))
+               Quasar query: SELECT `city`, `pop`, `state` FROM `zips` WHERE ((`pop` > 60000))
 (7 rows)
 
 SELECT * FROM zips_re z1, zips_re z2 WHERE z1.pop > 60000 AND z1.city = z2.city ORDER BY z1.city, z1.pop LIMIT 10;
@@ -65,9 +65,9 @@ EXPLAIN (COSTS off) SELECT * FROM zips_re z1, zips_re z2 WHERE z1.pop > 60000 AN
 ----------------------------------------------------------------------------------------------------------------
  Nested Loop
    ->  Foreign Scan on zips_re z1
-         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("pop" > 60000)) AND (("state" = 'MA'))
+         Quasar query: SELECT `city`, `pop`, `state` FROM `zips` WHERE ((`pop` > 60000)) AND ((`state` = "MA"))
    ->  Foreign Scan on zips_re z2
-         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE ((:p1 = "city"))
+         Quasar query: SELECT `city`, `pop`, `state` FROM `zips` WHERE ((:p1 = `city`))
 (5 rows)
 
 SELECT * FROM zips_re z1, zips_re z2 WHERE z1.pop > 60000 AND z1.state = 'MA' AND z1.city = z2.city ORDER BY z1.pop;
@@ -82,10 +82,10 @@ EXPLAIN (COSTS off) SELECT * FROM smallzips CROSS JOIN nested;
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    ->  Foreign Scan on smallzips
-         Quasar query: SELECT "city", "pop", "state" FROM "smallZips"
+         Quasar query: SELECT `city`, `pop`, `state` FROM `smallZips`
    ->  Materialize
          ->  Foreign Scan on nested
-               Quasar query: SELECT "topObj"."midObj"."botObj"."a" AS "a", "topObj"."midObj"."botObj"."b" AS "b", "topObj"."midObj"."botObj"."c" AS "c" FROM "nested"
+               Quasar query: SELECT `topObj`.`midObj`.`botObj`.`a` AS `a`, `topObj`.`midObj`.`botObj`.`b` AS `b`, `topObj`.`midObj`.`botObj`.`c` AS `c` FROM `nested`
 (6 rows)
 
 SELECT * FROM smallzips CROSS JOIN nested ORDER BY city LIMIT 2;
@@ -104,11 +104,11 @@ EXPLAIN (COSTS off) SELECT * FROM smallzips z1 LEFT OUTER JOIN zips_missing z2 O
    ->  Sort
          Sort Key: z2.missing
          ->  Foreign Scan on zips_missing z2
-               Quasar query: SELECT "city", "missing" FROM "smallZips"
+               Quasar query: SELECT `city`, `missing` FROM `smallZips`
    ->  Sort
          Sort Key: z1.city
          ->  Foreign Scan on smallzips z1
-               Quasar query: SELECT "city", "pop", "state" FROM "smallZips"
+               Quasar query: SELECT `city`, `pop`, `state` FROM `smallZips`
 (10 rows)
 
 SELECT * FROM smallzips z1 LEFT OUTER JOIN zips_missing z2 ON z1.city = z2.missing ORDER BY z1.city LIMIT 2;
@@ -126,11 +126,11 @@ EXPLAIN (COSTS off) SELECT * FROM smallzips z1 RIGHT OUTER JOIN zips_missing z2 
    ->  Sort
          Sort Key: z2.missing
          ->  Foreign Scan on zips_missing z2
-               Quasar query: SELECT "city", "missing" FROM "smallZips"
+               Quasar query: SELECT `city`, `missing` FROM `smallZips`
    ->  Sort
          Sort Key: z1.city
          ->  Foreign Scan on smallzips z1
-               Quasar query: SELECT "city", "pop", "state" FROM "smallZips"
+               Quasar query: SELECT `city`, `pop`, `state` FROM `smallZips`
 (10 rows)
 
 SELECT * FROM smallzips z1 RIGHT OUTER JOIN zips_missing z2 ON z1.city = z2.missing ORDER BY z2.city LIMIT 2;
@@ -146,8 +146,8 @@ EXPLAIN (COSTS off) SELECT * FROM zips_re z1, zips_re z2 WHERE z1.state = z2.sta
 ----------------------------------------------------------------------------------------------------------
  Nested Loop
    ->  Foreign Scan on zips_re z1
-         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("city"  IN ('BARRE', 'AGAWAM')))
+         Quasar query: SELECT `city`, `pop`, `state` FROM `zips` WHERE ((`city`  IN ("BARRE", "AGAWAM")))
    ->  Foreign Scan on zips_re z2
-         Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE ((:p1 = "state"))
+         Quasar query: SELECT `city`, `pop`, `state` FROM `zips` WHERE ((:p1 = `state`))
 (5 rows)
 
