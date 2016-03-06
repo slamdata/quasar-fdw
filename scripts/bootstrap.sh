@@ -39,11 +39,11 @@ NO_QUASAR=1
 POSTGRES_VERSION_REGEX=9.4
 
 ## User-customizable variables
-FDWVERSION=${FDWVERSION:-v1.0rc4}
+FDWVERSION=${FDWVERSION:-v1.0.1}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/quasar-analytics/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar-fdw}
-QUASARJARURL=${QUASARJARURL:-https://github.com/quasar-analytics/quasar/releases/download/v2.3.3-SNAPSHOT-2121-web/web_2.11-2.3.3-SNAPSHOT-one-jar.jar}
+QUASARJARURL=${QUASARJARURL:-https://github.com/quasar-analytics/quasar/releases/download/v3.2.0-web/web_2.11-3.2.0-one-jar.jar}
 
 ##
 ## Platform agnostic installation functions
