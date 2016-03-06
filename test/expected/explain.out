@@ -199,15 +199,11 @@ EXPLAIN (COSTS off, VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY p
  Foreign Scan on public.zips
    Output: city, pop, state
    Quasar query: SELECT "city", "pop", "state" FROM "zips" WHERE (("state" = 'CO')) ORDER BY "pop" DESC
-   Compiled Mongo Query: Mongo
- db.zips.aggregate(
-   [
-     { "$match": { "state": "CO" } },
-     { "$project": { "city": "$city", "pop": "$pop", "state": "$state" } },
-     { "$sort": { "pop": NumberInt(-1) } }],
-   { "allowDiskUse": true });
+   Compiled Mongo Query: MongoDB
+ db.zips.find({ "state": "CO" }, { "city": true, "pop": true, "state": true }).sort(
+   { "pop": NumberInt(-1) });
  
-(11 rows)
+(7 rows)
 
 /* Timestamps and dates pushdown */
 EXPLAIN (COSTS off) SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIMIT 2;
