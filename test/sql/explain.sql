@@ -20,8 +20,10 @@ EXPLAIN (COSTS off) SELECT * FROM zips WHERE "city" !~~ 'B%' LIMIT 3;
 /* pushdown math operators */
 EXPLAIN (COSTS off) SELECT * FROM zips WHERE pop > 1000 AND pop + pop <= 10000 LIMIT 3;
 /* join zips and zipsjson */
-EXPLAIN (COSTS off) SELECT zips.city AS city, pop, state, loc
-                    FROM zips JOIN zipsjson ON zips.city = zipsjson.city
+EXPLAIN (COSTS off) SELECT zips.city AS city, zips.pop, state, loc
+                    FROM zips JOIN zipsjson
+                         ON zips.city = zipsjson.city
+                         AND zips.pop = zipsjson.pop
                     LIMIT 3;
 /* query for a missing field */
 EXPLAIN (COSTS off) SELECT missing, city FROM zips_missing LIMIT 3;

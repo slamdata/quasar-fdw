@@ -13,7 +13,7 @@ SELECT city,pop FROM smallzips WHERE pop % 2 = 1 ORDER BY city LIMIT 3;
 /* Test out array usage */
 SELECT * FROM zipsloc ORDER BY loc[1] LIMIT 2;
 /* Test out json usage */
-SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson ORDER BY loc->0 LIMIT 2;
+SELECT loc->0 AS loc0, locb->1 AS loc1, locb FROM zipsjson ORDER BY city, pop LIMIT 2;
 /* Pushdown regex operators */
 SELECT * FROM zips WHERE "state" LIKE 'A%' ORDER BY city LIMIT 3;
 SELECT * FROM smallzips WHERE "city" !~~ 'B%' ORDER BY city LIMIT 3;
@@ -64,3 +64,5 @@ SELECT loc FROM zipsloc WHERE loc[1+1] > 0 ORDER BY loc[2] LIMIT 3;
 /* Scalar Array ops */
 SELECT * FROM smallzips WHERE state IN ('MA', 'CA') ORDER BY city,pop LIMIT 3;
 SELECT * FROM smallzips WHERE state IN ('MA') ORDER BY city,pop LIMIT 3;
+/* Spaced fields */
+SELECT * FROM weird_fields;

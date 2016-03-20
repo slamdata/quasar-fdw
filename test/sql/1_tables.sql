@@ -4,7 +4,7 @@ CREATE FOREIGN TABLE smallzips(city varchar, pop integer, state char(2))
        SERVER quasar OPTIONS (table 'smallZips');
 CREATE FOREIGN TABLE zipsloc(loc float[2])
        SERVER quasar OPTIONS (table 'smallZips');
-CREATE FOREIGN TABLE zipsjson(city varchar, loc json, locb jsonb OPTIONS (map 'loc'))
+CREATE FOREIGN TABLE zipsjson(city varchar, pop integer, loc json, locb jsonb OPTIONS (map 'loc'))
        SERVER quasar OPTIONS (table 'smallZips');
 CREATE FOREIGN TABLE nested(a varchar OPTIONS (map 'topObj.midObj.botObj.a'),
                             b varchar OPTIONS (map 'topObj.midObj.botObj.b'),
@@ -68,3 +68,8 @@ CREATE FOREIGN TABLE test_intervals(i interval)
        SERVER quasar OPTIONS (table 'testintervals_doesnt_exist');
 CREATE FOREIGN TABLE zips_badtype(city int, state char(1), pop date)
        SERVER quasar OPTIONS (table 'zips');
+CREATE FOREIGN TABLE weird_fields(
+               spaced varchar OPTIONS (map 'topObj.some field'),
+               underscored varchar OPTIONS (map '__underscored'),
+               toparray json OPTIONS (map 'topArr[*]'))
+       SERVER quasar OPTIONS (table 'nested');

@@ -97,19 +97,21 @@ EXPLAIN (COSTS off) SELECT * FROM zips WHERE pop > 1000 AND pop + pop <= 10000 L
 (3 rows)
 
 /* join zips and zipsjson */
-EXPLAIN (COSTS off) SELECT zips.city AS city, pop, state, loc
-                    FROM zips JOIN zipsjson ON zips.city = zipsjson.city
+EXPLAIN (COSTS off) SELECT zips.city AS city, zips.pop, state, loc
+                    FROM zips JOIN zipsjson
+                         ON zips.city = zipsjson.city
+                         AND zips.pop = zipsjson.pop
                     LIMIT 3;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
  Limit
-   ->  Nested Loop
-         Join Filter: ((zips.city)::text = (zipsjson.city)::text)
+   ->  Hash Join
+         Hash Cond: (((zips.city)::text = (zipsjson.city)::text) AND (zips.pop = zipsjson.pop))
          ->  Foreign Scan on zips
                Quasar query: SELECT `city`, `pop`, `state` FROM `zips`
-         ->  Materialize
+         ->  Hash
                ->  Foreign Scan on zipsjson
-                     Quasar query: SELECT `city`, `loc` FROM `smallZips`
+                     Quasar query: SELECT `city`, `pop`, `loc` FROM `smallZips`
 (8 rows)
 
 /* query for a missing field */
