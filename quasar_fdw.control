@@ -1,5 +1,5 @@
 # quasar FDW
 comment = 'Quasar Foreign Data Wrapper'
-default_version = '1.2'
+default_version = '1.2.1'
 module_pathname = '$libdir/quasar_fdw'
 relocatable = true
