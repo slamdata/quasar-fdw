@@ -287,9 +287,10 @@ SELECT * FROM smallzips WHERE state IN ('MA') ORDER BY city,pop LIMIT 3;
 (3 rows)
 
 /* Spaced fields */
-SELECT * FROM spaced;
- spaced | underscored | a | b | c 
---------+-------------+---+---+---
-        |             | m | n | o
-(1 row)
+SELECT * FROM weird_fields;
+ spaced | underscored |                       toparray                        
+--------+-------------+-------------------------------------------------------
+        |             | [[4,5,6],{"a":"d","b":"e","c":"f"}]
+        |             | {"botArr":[7,8,9],"botObj":{"a":"g","b":"h","c":"i"}}
+(2 rows)
 

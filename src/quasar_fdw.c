@@ -878,7 +878,7 @@ quasarBeginForeignScan(ForeignScanState *node,
     /*
      * Get connection to the foreign server.
      */
-    fsstate->conn = QuasarGetConnection(server);
+    fsstate->conn = QuasarGetConnection(server, table);
 
     /* Get private info created by planner functions. */
     fsstate->query = strVal(list_nth(fsplan->fdw_private,
@@ -1063,7 +1063,7 @@ quasarExplainForeignScan(ForeignScanState *node, ExplainState *es)
     {
         table = GetForeignTable(RelationGetRelid(node->ss.ss_currentRelation));
         server = GetForeignServer(table->serverid);
-        conn = QuasarGetConnection(server);
+        conn = QuasarGetConnection(server, table);
 
         mongo_query = QuasarCompileQuery(conn, sql);
         QuasarCleanupConnection(conn);
@@ -1197,7 +1197,7 @@ estimate_path_cost_size(PlannerInfo *root,
         /*     appendOrderByClause(&sql, root, baserel, pathkeys); */
 
         /* Get the remote estimate */
-        conn = QuasarGetConnection(fpinfo->server);
+        conn = QuasarGetConnection(fpinfo->server, fpinfo->table);
         rows = QuasarEstimateRows(conn, sql.data);
         QuasarCleanupConnection(conn);
     }

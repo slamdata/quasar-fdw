@@ -58,7 +58,7 @@ QuasarGlobalConnectionInit()
  * Connections are valid for a single query/explain
  */
 extern QuasarConn *
-QuasarGetConnection(ForeignServer *server)
+QuasarGetConnection(ForeignServer *server, ForeignTable *table)
 {
     ListCell *lc;
     QuasarConn *conn = palloc0(sizeof(QuasarConn));
@@ -77,6 +77,35 @@ QuasarGetConnection(ForeignServer *server)
             conn->path = defGetString(def);
         else if (strcmp(def->defname, "timeout_ms") == 0)
             conn->timeout_ms = strtod(defGetString(def), NULL);
+    }
+
+    conn->table_path = NULL;
+    foreach (lc, table->options)
+    {
+        DefElem *def = (DefElem *) lfirst(lc);
+        if (strcmp(def->defname, "table") == 0)
+        {
+            char * table = pstrdup(defGetString(def));
+            if (strpbrk(table, "/") != NULL)
+            {
+                /* The goal here is to build out the path
+                   contained in the table option without
+                   the final section (the table) */
+                StringInfoData tpath_builder;
+                initStringInfo(&tpath_builder);
+
+                char * seg0 = strtok(table, "/");
+                char * seg1 = strtok(NULL, "/");
+                while (seg1 != NULL)
+                {
+                    appendStringInfo(&tpath_builder, "%s/", seg0);
+
+                    seg0 = seg1;
+                    seg1 = strtok(NULL, "/");
+                }
+                conn->table_path = tpath_builder.data;
+            }
+        }
     }
 
     conn->curlm = NULL;
@@ -240,7 +269,7 @@ QuasarExecuteQueryPost(QuasarConn *conn, char *query,
     }
 
     initStringInfo(&dest);
-    appendStringInfo(&dest, "%s%sfdw_%d", conn->path, conn->path[strlen(conn->path)-1] == '/' ? "" : "/", rand());
+    appendStringInfo(&dest, "%s%s%sfdw_%d", conn->path, conn->path[strlen(conn->path)-1] == '/' ? "" : "/", conn->table_path, rand());
     conn->post_path = pstrdup(dest.data);
     resetStringInfo(&dest);
     appendStringInfo(&dest, "Destination: %s", conn->post_path);

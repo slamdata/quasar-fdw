@@ -43,7 +43,9 @@ CREATE FOREIGN TABLE wide_comments
 ,a4comment_text varchar OPTIONS (map 'comments[*].text')
 ,a4comment_reply_to_profile integer OPTIONS (map 'comments[*].replyTo[0]')
 ,a4comment_reply_to_comment char(10) OPTIONS (map 'comments[*].replyTo[1]')
-,a4comment_time varchar OPTIONS (map 'comments[*].time'))
-SERVER quasar OPTIONS (table 'user_comments');
+,a4comment_time varchar OPTIONS (map 'comments[*].time')
+,missing_space varchar OPTIONS (map 'profile.spaced field')
+,missing_expand varchar OPTIONS (map 'missing[*]'))
+SERVER quasar_root OPTIONS (table 'local/quasar/user_comments');
 /* Now select from this wide table */
 SELECT * FROM wide_comments;
