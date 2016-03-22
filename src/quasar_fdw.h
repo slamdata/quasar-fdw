@@ -125,6 +125,7 @@ typedef struct QuasarConn
                                  * Needs to be DELETEd afterwards */
     char *server;
     char *path;
+    char *table_path;           /* Path contained in the table specifier */
     char *full_url;
     long timeout_ms; /* curl request timeout */
 
@@ -138,7 +139,7 @@ typedef struct QuasarConn
 
 /* quasar_conn.c headers */
 extern void QuasarGlobalConnectionInit(void);
-extern QuasarConn *QuasarGetConnection(ForeignServer *server);
+extern QuasarConn *QuasarGetConnection(ForeignServer *server, ForeignTable *table);
 extern void QuasarCleanupConnection(QuasarConn *conn);
 extern void QuasarResetConnection(QuasarConn *conn);
 
