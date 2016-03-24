@@ -1025,7 +1025,15 @@ deparseRelation(StringInfo buf, Relation rel)
         DefElem    *def = (DefElem *) lfirst(lc);
 
         if (strcmp(def->defname, "table") == 0)
+        {
+            char * c;
             relname = defGetString(def);
+
+            /* Skip to the non-path part of the relation */
+            c = strrchr(relname, '/');
+            if (c != NULL)
+                relname = c + 1;
+        }
     }
 
     if (relname == NULL)
