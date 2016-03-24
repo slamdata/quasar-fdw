@@ -79,20 +79,20 @@ QuasarGetConnection(ForeignServer *server, ForeignTable *table)
             conn->timeout_ms = strtod(defGetString(def), NULL);
     }
 
-    conn->table_path = NULL;
     foreach (lc, table->options)
     {
         DefElem *def = (DefElem *) lfirst(lc);
         if (strcmp(def->defname, "table") == 0)
         {
             char * table = pstrdup(defGetString(def));
-            if (strpbrk(table, "/") != NULL)
+            if (strchr(table, '/') != NULL)
             {
                 /* The goal here is to build out the path
                    contained in the table option without
                    the final section (the table) */
                 StringInfoData tpath_builder;
                 initStringInfo(&tpath_builder);
+                appendStringInfoString(&tpath_builder, conn->path);
 
                 char * seg0 = strtok(table, "/");
                 char * seg1 = strtok(NULL, "/");
@@ -103,7 +103,7 @@ QuasarGetConnection(ForeignServer *server, ForeignTable *table)
                     seg0 = seg1;
                     seg1 = strtok(NULL, "/");
                 }
-                conn->table_path = tpath_builder.data;
+                conn->path = tpath_builder.data;
             }
         }
     }
@@ -269,7 +269,7 @@ QuasarExecuteQueryPost(QuasarConn *conn, char *query,
     }
 
     initStringInfo(&dest);
-    appendStringInfo(&dest, "%s%s%sfdw_%d", conn->path, conn->path[strlen(conn->path)-1] == '/' ? "" : "/", conn->table_path, rand());
+    appendStringInfo(&dest, "%s%sfdw_%d", conn->path, conn->path[strlen(conn->path)-1] == '/' ? "" : "/", rand());
     conn->post_path = pstrdup(dest.data);
     resetStringInfo(&dest);
     appendStringInfo(&dest, "Destination: %s", conn->post_path);

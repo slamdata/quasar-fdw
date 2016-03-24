@@ -125,7 +125,6 @@ typedef struct QuasarConn
                                  * Needs to be DELETEd afterwards */
     char *server;
     char *path;
-    char *table_path;           /* Path contained in the table specifier */
     char *full_url;
     long timeout_ms; /* curl request timeout */
 
