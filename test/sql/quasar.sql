@@ -56,8 +56,8 @@ SELECT city FROM zips_badtype ORDER BY city;
 SELECT state FROM zips_badtype ORDER BY state;
 SELECT pop FROM zips_badtype ORDER BY pop;
 /* Aggregations */
-SELECT count(*) FROM smallzips;
-SELECT count(*) FROM zips WHERE state IN ('CA','OR','WA');
+SELECT count(state) FROM smallzips;
+SELECT count(state) FROM zips WHERE state IN ('CA','OR','WA');
 /* Array subscripts push down correctly from 1-based to 0-based */
 SELECT loc FROM zipsloc WHERE loc[1] < 0 ORDER BY loc[1] LIMIT 3;
 SELECT loc FROM zipsloc WHERE loc[1+1] > 0 ORDER BY loc[2] LIMIT 3;

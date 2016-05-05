@@ -203,7 +203,7 @@ EXPLAIN (COSTS off, VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY p
    Quasar query: SELECT `city`, `pop`, `state` FROM `zips` WHERE ((`state` = "CO")) ORDER BY `pop` DESC
    Compiled Mongo Query: MongoDB
  db.zips.find({ "state": "CO" }, { "city": true, "pop": true, "state": true }).sort(
-   { "pop": NumberInt(-1) });
+   { "pop": NumberInt("-1") });
  
 (7 rows)
 
