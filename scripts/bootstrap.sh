@@ -111,19 +111,19 @@ function install_binaries()
 {
     logx wget $TAR -O ${TARBASE}.tar.gz
     logx tar xzvf ${TARBASE}.tar.gz
-    pushd ${TARBASE}
+    mypushd ${TARBASE}
     logx ./install.sh
-    popd
+    mypopd
 }
 
 function install_fdw()
 {
     log "Installing Quasar FDW version $FDWVERSION"
-    (logx wget "$FDWCLONEURL/archive/$FDWVERSION.tar.gz" -O "quasar_fdw-$FDWVERSION.tar.gz") \
+    (logx wget "$FDWCLONEURL/archive/$FDWVERSION.tar.gz" -O "quasar-fdw-$FDWVERSION.tar.gz") \
         || error "Getting FDW repository failed"
-    (logx tar xzvf "quasar_fdw-$FDWVERSION.tar.gz") \
+    (logx tar xzvf "quasar-fdw-$FDWVERSION.tar.gz") \
         || error "Untaring FDW repository failed"
-    mypushd "quasar_fdw-*"
+    mypushd "quasar-fdw-${FDWVERSION#v}"
     (logx make install) \
         || error "Error installing Quasar FDW"
     mypopd
@@ -136,7 +136,7 @@ function install_yajl()
         || error "Getting YAJL repository failed"
     (logx tar xzvf "yajl-$YAJLVERSION.tar.gz") \
         || error "Untaring YAJL repository failed"
-    mypushd "yajl-*"
+    mypushd "yajl-$YAJLVERSION"
     (logx ./configure) \
         || error "Configuration of YAJL failed"
     (logx make clean install) \
