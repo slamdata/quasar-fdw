@@ -166,12 +166,23 @@ static void quasarGetForeignPaths(PlannerInfo *root,
                                   RelOptInfo *baserel,
                                   Oid foreigntableid);
 
+
+static ForeignScan *quasarGetForeignPlan95(PlannerInfo *root,
+                                               RelOptInfo *baserel,
+                                               Oid foreigntableid,
+                                               ForeignPath *best_path,
+                                               List *tlist,
+                                               List *scan_clauses,
+                                               Plan *outer_plan);
+
+
 static ForeignScan *quasarGetForeignPlan(PlannerInfo *root,
                                          RelOptInfo *baserel,
                                          Oid foreigntableid,
                                          ForeignPath *best_path,
                                          List *tlist,
                                          List *scan_clauses);
+
 
 static void quasarBeginForeignScan(ForeignScanState *node,
                                       int eflags);
@@ -237,7 +248,11 @@ quasar_fdw_handler(PG_FUNCTION_ARGS)
       /* these are required */
       fdwroutine->GetForeignRelSize = quasarGetForeignRelSize; /* S U D */
       fdwroutine->GetForeignPaths = quasarGetForeignPaths;        /* S U D */
+#if (PG_VERSION_NUM >= 90500)
+      fdwroutine->GetForeignPlan = quasarGetForeignPlan95;          /* S U D */
+#else
       fdwroutine->GetForeignPlan = quasarGetForeignPlan;          /* S U D */
+#endif
       fdwroutine->BeginForeignScan = quasarBeginForeignScan;      /* S U D */
       fdwroutine->IterateForeignScan = quasarIterateForeignScan;        /* S */
       fdwroutine->ReScanForeignScan = quasarReScanForeignScan; /* S */
@@ -458,6 +473,9 @@ quasarGetForeignPaths(PlannerInfo *root,
                                    fpinfo->total_cost,
                                    NIL, /* no pathkeys */
                                    NULL,                /* no outer rel either */
+#if (PG_VERSION_NUM >= 90500)
+                                   NULL, /* no extra plan */
+#endif
                                    NIL);                /* no fdw_private list */
     add_path(baserel, (Path *) path);
 
@@ -521,6 +539,9 @@ quasarGetForeignPaths(PlannerInfo *root,
                                          total_cost,
                                          usable_pathkeys,
                                          NULL,
+#if (PG_VERSION_NUM >= 90500)
+                                         NULL,
+#endif
                                          NIL));
     }
 
@@ -683,12 +704,13 @@ quasarGetForeignPaths(PlannerInfo *root,
                                        total_cost,
                                        NIL,             /* no pathkeys */
                                        param_info->ppi_req_outer,
+#if (PG_VERSION_NUM >= 90500)
+                                       NULL,
+#endif
                                        NIL);    /* no fdw_private list */
         add_path(baserel, (Path *) path);
     }
 }
-
-
 
 static ForeignScan *
 quasarGetForeignPlan(PlannerInfo *root,
@@ -697,6 +719,19 @@ quasarGetForeignPlan(PlannerInfo *root,
                      ForeignPath *best_path,
                      List *tlist,
                      List *scan_clauses)
+{
+    return quasarGetForeignPlan95(root, baserel, foreigntableid, best_path, tlist, scan_clauses, NULL);
+}
+
+
+static ForeignScan *
+quasarGetForeignPlan95(PlannerInfo *root,
+                       RelOptInfo *baserel,
+                       Oid foreigntableid,
+                       ForeignPath *best_path,
+                       List *tlist,
+                       List *scan_clauses,
+                       Plan *outer_plan)
 {
     /*
      * Create a ForeignScan plan node from the selected foreign access path.
@@ -815,7 +850,8 @@ quasarGetForeignPlan(PlannerInfo *root,
                             params_list,
                             fdw_private,
                             scan_tlist,
-                            remote_exprs);
+                            remote_exprs,
+                            outer_plan);
 #endif  /* PG_VERSION_NUM */
 }
 

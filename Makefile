@@ -78,7 +78,7 @@ build-quasar:
 	cd $(QUASAR_DIR) && ./sbt 'project web' oneJar
 
 start-quasar:
-	java -jar $(QUASAR_DIR)/web/target/scala-$(SCALA_VERSION)/web_$(SCALA_VERSION)-$(QUASAR_VERSION)-one-jar.jar -c test/quasar-config.json
+	java -jar $(QUASAR_DIR)/web/target/scala-$(SCALA_VERSION)/quasar-web-assembly-$(QUASAR_VERSION).jar -c test/quasar-config.json
 
 
 build-yajl:
