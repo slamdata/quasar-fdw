@@ -47,6 +47,9 @@
 #define QUASAR_STARTUP_COST 10.0
 #define QUASAR_PER_TUPLE_COST 0.001
 
+#define P_NO_RECORD 0
+#define P_RECORD_COMPLETE 1
+#define P_RECORD_STARTED 2
 
 /*
  * FDW-specific planner information kept in RelOptInfo.fdw_private for a
@@ -108,6 +111,7 @@ typedef struct quasar_query_curl_context {
     int         num_tuples;             /* # of tuples in array */
     int         next_tuple;             /* index of next one to return */
     int         alloc_tuples;           /* Number allocated spots for tuples */
+    bool        partial_tuple;           /* Is a tuple partially parsed? */
 } quasar_query_curl_context;
 
 typedef struct quasar_info_curl_context {
@@ -165,11 +169,12 @@ void quasar_parse_alloc(quasar_parse_context *ctx,
                         Relation rel);
 void quasar_parse_free(quasar_parse_context *ctx);
 void quasar_parse_reset(quasar_parse_context *ctx);
-bool quasar_parse(quasar_parse_context *ctx,
-                  const char *buffer,
-                  size_t *buf_loc,
-                  size_t buf_size,
-                  HeapTuple *result);
+int quasar_parse(quasar_parse_context *ctx,
+                 const char *buffer,
+                 size_t *buf_loc,
+                 size_t buf_size,
+                 HeapTuple *result);
+void quasar_copy_parse_context(quasar_parse_context *ctx);
 
 /* quasar_query.c headers */
 extern void classifyConditions(PlannerInfo *root,

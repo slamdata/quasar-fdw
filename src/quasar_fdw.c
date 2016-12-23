@@ -960,7 +960,7 @@ quasarIterateForeignScan(ForeignScanState *node)
     TupleTableSlot *slot;
     ExprContext *econtext;
 
-    elog(DEBUG4, "entering function %s", __func__);
+    elog(DEBUG5, "entering function %s", __func__);
 
     fsstate = (QuasarFdwScanState *)node->fdw_state;
     slot = node->ss.ss_ScanTupleSlot;
@@ -1217,8 +1217,8 @@ estimate_path_cost_size(PlannerInfo *root,
     total_cost = startup_cost + rows * cpu_per_tuple;
     retrieved_rows = rows;
 
-    elog(DEBUG1, "Estimating path cost with remote_enabled: %s %f %f",
-         sql.data, rows, total_cost);
+    elog(DEBUG1, "Estimating path cost with remote_enabled: %f %f",
+         rows, total_cost);
 
     /* Factor in the selectivity of the locally-checked quals */
     local_sel = clauselist_selectivity(root,

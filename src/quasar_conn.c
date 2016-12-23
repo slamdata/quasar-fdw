@@ -196,6 +196,7 @@ QuasarExecuteQuery(QuasarConn *conn, char *query,
     conn->qctx->num_tuples = 0;
     conn->qctx->next_tuple = 0;
     conn->qctx->alloc_tuples = 0;
+    conn->qctx->partial_tuple = false;
     conn->qctx->batch_count = 0;
     conn->qctx->status = 0;
 
@@ -565,9 +566,14 @@ query_body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
     if (ctx->next_tuple >= ctx->num_tuples) {
         elog(DEBUG3, "paging batched tuples %d (%d / %d)", ctx->batch_count,
              ctx->next_tuple, ctx->num_tuples);
+        if (ctx->partial_tuple) {
+            elog(DEBUG3, "Found partial tuple from end of last batch, copying...");
+            quasar_copy_parse_context(&ctx->parse);
+        }
         ctx->tuples = NULL;
         MemoryContextReset(ctx->batchmem);
         ctx->next_tuple = ctx->num_tuples = ctx->alloc_tuples = 0;
+        ctx->partial_tuple = false;
     }
     oldcontext = MemoryContextSwitchTo(ctx->batchmem);
 
@@ -588,9 +594,14 @@ query_body_handler(void *buffer, size_t size, size_t nmemb, void *userp)
 
     /* Parse each tuple one at a time */
     while (offset < segsize) {
-        if (quasar_parse(&ctx->parse, buffer, &offset,
-                         segsize, &ctx->tuples[ctx->num_tuples])) {
+        int ret = quasar_parse(&ctx->parse, buffer, &offset,
+                               segsize, &ctx->tuples[ctx->num_tuples]);
+        ctx->partial_tuple = false;
+        if (ret == P_RECORD_COMPLETE) {
             ++ctx->num_tuples;
+        } else if (ret == P_RECORD_STARTED) {
+            elog(DEBUG3, "Partial tuple returned from quasar_parse...");
+            ctx->partial_tuple = true;
         }
         Assert(ctx->num_tuples <= ctx->alloc_tuples);
     }

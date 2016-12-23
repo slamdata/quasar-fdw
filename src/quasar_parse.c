@@ -23,7 +23,9 @@
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
 #include "common/fe_memutils.h"
+#include "utils/datum.h"
 #include "utils/syscache.h"
+
 
 
 #define YAJL_OK 1
@@ -46,6 +48,7 @@ typedef struct parser {
     /* Internal flags */
     size_t cur_col;
     bool record_complete;
+    bool record_started;
     int level;
     StringInfoData json;
     StringInfoData array;
@@ -167,6 +170,9 @@ static void store_datum(parser *p, char *string, const char *fmt) {
 
     i = p->cur_col;
 
+    p->record_started = true;
+    elog(DEBUG4, "quasar_fdw: Record Started store_datum");
+
     if (p->level == COLUMN_LEVEL &&
         !get_column(p)->attisdropped) {
         /* Setup our error callback */
@@ -179,6 +185,8 @@ static void store_datum(parser *p, char *string, const char *fmt) {
                                          p->attinmeta->attioparams[i],
                                          p->attinmeta->atttypmods[i]);
         p->nulls[i] = false;
+
+        elog(DEBUG4, "quasar_fdw: Setting value %d", i);
 
         /* Reset error stack */
         error_context_stack = p->errcallback.previous;
@@ -194,6 +202,9 @@ static void store_datum(parser *p, char *string, const char *fmt) {
 
 static void store_null(parser *p) {
     /* Assert the column is valid */
+
+    p->record_started = true;
+    elog(DEBUG4, "quasar_fdw: Record Started store_null at %d", p->cur_col);
 
     if (p->level > COLUMN_LEVEL && is_json_type(p)) {
         jsonAppendCommaIf(p);
@@ -264,7 +275,8 @@ static int cb_map_key(void * ctx,
         }
 
         /* This is OK if we did a SELECT NULL */
-        elog(DEBUG3, "quasar_fdw internal: Couldnt find column for returned field: %s", s);
+        if (p->cur_col == NO_COLUMN)
+            elog(DEBUG3, "quasar_fdw internal: Couldnt find column for returned field: %s", s);
     } else if (p->level > COLUMN_LEVEL) {
         if (is_json_type(p)) {
             jsonAppendCommaIf(p);
@@ -320,7 +332,7 @@ static int cb_end_map(void * ctx) {
         if (p->json.len == 0) {
             store_null(p);
         } else {
-            elog(DEBUG4, "Parsed value for json json: %s", p->json.data);
+            elog(DEBUG4, "Parsed value for json: %s", p->json.data);
             store_datum(p, pstrdup(p->json.data), "%s");
             resetStringInfo(&p->json);
         }
@@ -420,6 +432,7 @@ void quasar_parse_alloc(quasar_parse_context *ctx, Relation rel) {
     p->cur_col = NO_COLUMN;
     p->level = TOP_LEVEL;
     p->record_complete = false;
+    p->record_started = false;
     p->rel = rel;
     p->attinmeta = TupleDescGetAttInMetadata(RelationGetDescr(rel));
     p->values = palloc(p->attinmeta->tupdesc->natts * sizeof(Datum));
@@ -454,20 +467,21 @@ void quasar_parse_reset(quasar_parse_context *ctx) {
     p->cur_col = NO_COLUMN;
     p->level = TOP_LEVEL;
     p->record_complete = false;
+    p->record_started = false;
     p->warned = false;
     resetStringInfo(&p->json);
     resetStringInfo(&p->array);
     yajl_reset(ctx->handle);
 }
 
-bool
+int
 quasar_parse(quasar_parse_context *ctx,
              const char *buffer,
              size_t *buf_loc,
              size_t buf_size,
              HeapTuple *tuple)
 {
-    bool found;
+    int ret;
     parser *p;
     yajl_status status;
     yajl_handle hand;
@@ -475,7 +489,7 @@ quasar_parse(quasar_parse_context *ctx,
 
     elog(DEBUG4, "entering function %s", __func__);
 
-    found = false;
+    ret = P_NO_RECORD;
     p = (parser*) ctx->p;
     hand = ctx->handle;
 
@@ -506,16 +520,44 @@ quasar_parse(quasar_parse_context *ctx,
              bytes,
              p->record_complete ? "found" : "didnt find");
 
-        found = p->record_complete;
+        if (p->record_complete)
+            ret = P_RECORD_COMPLETE;
+        else if (p->record_started)
+            ret = P_RECORD_STARTED;
+
         *buf_loc += bytes;
-        p->record_complete = false;
+        p->record_complete = p->record_started = false;
     }
 
-    if (found) {
+    if (ret == P_RECORD_COMPLETE) {
         *tuple = heap_form_tuple(p->attinmeta->tupdesc, p->values, p->nulls);
     }
 
-    return found;
+    return ret;
+}
+
+/*
+ * Copy the values currently stored in the parse context into newly
+ * reallocated space. This is called shortly before the old space is
+ * reset.
+ */
+void
+quasar_copy_parse_context(quasar_parse_context *ctx)
+{
+    parser *p;
+    int i;
+    Form_pg_attribute col;
+
+    p = (parser*) ctx->p;
+
+    for (i = 0; i < p->attinmeta->tupdesc->natts; i++)
+    {
+        if (p->nulls[i] == true)
+            continue;
+
+        col = p->attinmeta->tupdesc->attrs[i];
+        p->values[i] = datumCopy(p->values[i], col->attbyval, col->attlen);
+    }
 }
 
 
