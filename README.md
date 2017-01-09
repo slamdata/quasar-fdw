@@ -4,9 +4,9 @@ This FDW forwards SELECT statements to [Quasar](https://github.com/quasar-analyt
 
 The main advantage of using this FDW over alternatives is that it takes full advantage of the Quasar query engine by "pushing down" as many clauses from the PostgreSQL query to Quasar as possible. This includes WHERE, ORDER BY, and JOIN clauses.
 
-Latest Version: `v1.0rc4`
-Required Quasar Version: `2.3.3-SNAPSHOT-2121-web`
-Required PostgreSQL Version: `9.4`
+Latest Version: `v1.4.0`
+Required Quasar Version: `9.x.x` through `13.x.x`
+Required PostgreSQL Version: `9.4` or `9.5`
 
 ## Install
 
@@ -19,7 +19,8 @@ This version of quasar_fdw requires PostgreSQL 9.4.
 The `scripts/bootstrap.sh` will bootstrap the installation for you. It will install PostgreSQL 9.4 if it is not already installed. Then, if your system has precompiled binaries available, it will simply download those. Otherwise, it will download two libraries (a required json parser [yajl](https://github.com/lloyd/yajl) and this repository) and install both.
 
 ```bash
-scripts/bootstrap.sh
+FDWVERSION=x.x.x POSTGRES_VERSION=9.5 \
+ scripts/bootstrap.sh
 ```
 
 Now you can create servers and tables, see [Usage](#usage).

@@ -7,3 +7,4 @@ test/results/*
 regression.*
 results/*
 quasar_fdw-*x86*
+.temp.*.dockerfile

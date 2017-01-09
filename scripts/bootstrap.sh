@@ -36,14 +36,17 @@ USE_SOURCE=
 NO_QUASAR=1
 
 ## Configuration
-POSTGRES_VERSION_REGEX=9.4
+POSTGRES_VERSION=${POSTGRES_VERSION:-9.4}
 
 ## User-customizable variables
 FDWVERSION=${FDWVERSION:-v1.4.0}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/quasar-analytics/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar-fdw}
-QUASARJARURL=${QUASARJARURL:-https://github.com/quasar-analytics/quasar/releases/download/v9.2.2-web/web_2.11-9.2.2-one-jar.jar}
+QUASARJARURL=${QUASARJARURL:-https://github.com/quasar-analytics/quasar/releases/download/v13.1.8-quasar-web/quasar-web-assembly-13.1.8.jar}
+
+
+POSTGRES_VERSION_NODOT=${POSTGRES_VERSION//.}
 
 ##
 ## Platform agnostic installation functions
@@ -88,7 +91,7 @@ function test_current_postgres_install()
     if [[ -z $(which pg_config 2>/dev/null) ]]; then
         log "You do not have PostgreSQL. Installing..."
         TODO_PG_INSTALL=1
-    elif ! [[ $(pg_config --version) =~ "$POSTGRES_VERSION_REGEX" ]]; then
+    elif ! [[ $(pg_config --version) =~ "$POSTGRES_VERSION" ]]; then
         log "Your PostgreSQL install is out of date. It will be updated."
         TODO_PG_UPDATE=1
     else
@@ -163,6 +166,10 @@ function cleanup()
 
 function ensure_requirements()
 {
+    if [[ -z $(which sudo) ]]; then
+        error "sudo is required. apt-get install sudo."
+    fi
+
     case $OS in
         osx)
             if [[ -z $(which brew) ]]; then
@@ -225,9 +232,9 @@ function install_postgres()
                   || error "Couldn't get postgresql repo signing key"
             logx sudo apt-get update
 
-            (logx sudo apt-get install -y postgresql-9.4 \
-                                          postgresql-server-dev-9.4) \
-                || error "Couldn't install postgresql-9.4"
+            (logx sudo apt-get install -y postgresql-${POSTGRES_VERSION} \
+                                          postgresql-server-dev-${POSTGRES_VERSION}) \
+                || error "Couldn't install postgresql-${POSTGRES_VERSION}"
             ;;
         centos)
             case $OSTYPE in
@@ -244,11 +251,11 @@ function install_postgres()
                 rhel)
                     logx sudo sed 's/\(\[main\]\)/\1\nexclude=postgresql*/' -i /etc/yum/pluginconf.d/rhnplugin.conf
                     logx sudo sed 's/\(\[main\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora-updates.repo
-                    logx sudo rpm -Uvh http://yum.postgresql.org/9.4/redhat/rhel-${OSVERSION}-x86_64/pgdg-redhat94-9.4-2.noarch.rpm
+                    logx sudo rpm -Uvh http://yum.postgresql.org/${POSTGRES_VERSION}/redhat/rhel-${OSVERSION}-x86_64/pgdg-redhat94-${POSTGRES_VERSION}-2.noarch.rpm
                     ;;
             esac
 
-            logx sudo $YUM install -y postgresql94 postgresql94-server postgresql94-libs
+            logx sudo $YUM install -y postgresql${POSTGRES_VERSION_NODOT} postgresql${POSTGRES_VERSION_NODOT}-server postgresql${POSTGRES_VERSION_NODOT}-libs
             ;;
         *)
             ;;

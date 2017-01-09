@@ -38,8 +38,8 @@ sed "s/FDWVERSION=.*/FDWVERSION=\${FDWVERSION:-v${1}}/" -i scripts/bootstrap.sh
 # Replace tag in README
 sed "s/Lastest Version:.*/Latest Version: \`v${1}\`/" -i README.md
 
-# Make tar file
-make tar
+# build osx tar
+scripts/build_osx_release.sh
 
 # Make linux tar
 scripts/build_linux_release.sh
