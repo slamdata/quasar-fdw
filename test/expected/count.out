@@ -1,0 +1,78 @@
+/* Normal count */
+select count(*) from zips;
+ count 
+-------
+     1
+(1 row)
+
+/* Count with where */
+select count(*) from zips where "state" = 'CO';
+ count 
+-------
+     1
+(1 row)
+
+/* Count with group by */
+select state, count(*) from zips group by state;
+ state | count 
+-------+-------
+ AK    |   195
+ AL    |   567
+ AR    |   578
+ AZ    |   270
+ CA    |  1516
+ CO    |   414
+ CT    |   263
+ DC    |    24
+ DE    |    53
+ FL    |   804
+ GA    |   635
+ HI    |    80
+ IA    |   922
+ ID    |   244
+ IL    |  1237
+ IN    |   676
+ KS    |   715
+ KY    |   809
+ LA    |   464
+ MA    |   474
+ MD    |   420
+ ME    |   410
+ MI    |   876
+ MN    |   882
+ MO    |   994
+ MS    |   363
+ MT    |   314
+ NC    |   705
+ ND    |   391
+ NE    |   574
+ NH    |   218
+ NJ    |   540
+ NM    |   276
+ NV    |   104
+ NY    |  1595
+ OH    |  1007
+ OK    |   586
+ OR    |   384
+ PA    |  1458
+ RI    |    69
+ SC    |   350
+ SD    |   384
+ TN    |   582
+ TX    |  1671
+ UT    |   205
+ VA    |   816
+ VT    |   243
+ WA    |   484
+ WI    |   716
+ WV    |   656
+ WY    |   140
+(51 rows)
+
+/* Count with field */
+select count(city) from zips;
+ count 
+-------
+ 29353
+(1 row)
+

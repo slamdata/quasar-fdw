@@ -171,7 +171,11 @@ static ForeignScan *quasarGetForeignPlan(PlannerInfo *root,
                                          Oid foreigntableid,
                                          ForeignPath *best_path,
                                          List *tlist,
-                                         List *scan_clauses);
+                                         List *scan_clauses
+#if(PG_VERSION_NUM >= 90500)
+                                         ,Plan *outer_plan
+#endif
+    );
 
 static void quasarBeginForeignScan(ForeignScanState *node,
                                       int eflags);
@@ -458,6 +462,9 @@ quasarGetForeignPaths(PlannerInfo *root,
                                    fpinfo->total_cost,
                                    NIL, /* no pathkeys */
                                    NULL,                /* no outer rel either */
+#if(PG_VERSION_NUM >= 90500)
+                                   NULL, /* no extra plan */
+#endif
                                    NIL);                /* no fdw_private list */
     add_path(baserel, (Path *) path);
 
@@ -521,6 +528,9 @@ quasarGetForeignPaths(PlannerInfo *root,
                                          total_cost,
                                          usable_pathkeys,
                                          NULL,
+#if(PG_VERSION_NUM >= 90500)
+                                         NULL, /* no extra plan */
+#endif
                                          NIL));
     }
 
@@ -683,6 +693,9 @@ quasarGetForeignPaths(PlannerInfo *root,
                                        total_cost,
                                        NIL,             /* no pathkeys */
                                        param_info->ppi_req_outer,
+#if(PG_VERSION_NUM >= 90500)
+                                       NULL, /* no extra plan */
+#endif
                                        NIL);    /* no fdw_private list */
         add_path(baserel, (Path *) path);
     }
@@ -696,7 +709,11 @@ quasarGetForeignPlan(PlannerInfo *root,
                      Oid foreigntableid,
                      ForeignPath *best_path,
                      List *tlist,
-                     List *scan_clauses)
+                     List *scan_clauses
+#if(PG_VERSION_NUM >= 90500)
+                     ,Plan *outer_plan
+#endif /* PG_VERSION_NUM */
+    )
 {
     /*
      * Create a ForeignScan plan node from the selected foreign access path.
@@ -802,21 +819,17 @@ quasarGetForeignPlan(PlannerInfo *root,
      * field of the finished plan node; we can't keep them in private state
      * because then they wouldn't be subject to later planner processing.
      */
-#if(PG_VERSION_NUM < 90500)
     return make_foreignscan(tlist,
                             local_exprs,
                             scan_relid,
                             params_list,
-                            fdw_private);
-#else
-    return make_foreignscan(tlist,
-                            local_exprs,
-                            scan_relid,
-                            params_list,
-                            fdw_private,
-                            scan_tlist,
-                            remote_exprs);
-#endif  /* PG_VERSION_NUM */
+                            fdw_private
+#if(PG_VERSION_NUM >= 90500)
+                            ,scan_tlist
+                            ,remote_exprs
+                            ,outer_plan
+#endif /* PG_VERSION_NUM */
+        );
 }
 
 

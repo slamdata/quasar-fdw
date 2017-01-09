@@ -179,7 +179,7 @@ EXPLAIN (COSTS off) SELECT * FROM zips ORDER BY state NULLS FIRST;
                            QUERY PLAN                            
 -----------------------------------------------------------------
  Sort
-   Sort Key: state
+   Sort Key: state NULLS FIRST
    ->  Foreign Scan on zips
          Quasar query: SELECT `city`, `pop`, `state` FROM `zips`
 (4 rows)
@@ -196,16 +196,13 @@ EXPLAIN (COSTS off) SELECT * FROM commits ORDER BY ts, sha;
 
 /* VERBOSE on */
 EXPLAIN (COSTS off, VERBOSE on) SELECT * FROM zips WHERE state = 'CO' ORDER BY pop DESC;
-                                               QUERY PLAN                                               
---------------------------------------------------------------------------------------------------------
+                                                                                                      QUERY PLAN                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Foreign Scan on public.zips
    Output: city, pop, state
    Quasar query: SELECT `city`, `pop`, `state` FROM `zips` WHERE ((`state` = "CO")) ORDER BY `pop` DESC
-   Compiled Mongo Query: MongoDB
- db.zips.find({ "state": "CO" }, { "city": true, "pop": true, "state": true }).sort(
-   { "pop": NumberInt("-1") });
- 
-(7 rows)
+   Compiled Mongo Query: { "physicalPlan": "db.zips.find({ \"state\": \"CO\" }, { \"city\": true, \"pop\": true, \"state\": true }).sort(\n  { \"pop\": NumberInt(\"-1\") });\n", "inputs": [ "/local/quasar/zips" ] }
+(4 rows)
 
 /* Timestamps and dates pushdown */
 EXPLAIN (COSTS off) SELECT * FROM commits_timestamps WHERE ts < TIMESTAMP '2015-01-20T00:00:00Z' LIMIT 2;

@@ -45,5 +45,3 @@ make tar
 scripts/build_linux_release.sh
 
 git add .
-git commit -m "bump to $1"
-git tag "v$1"

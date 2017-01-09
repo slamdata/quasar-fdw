@@ -204,7 +204,7 @@ static void store_null(parser *p) {
     /* Assert the column is valid */
 
     p->record_started = true;
-    elog(DEBUG4, "quasar_fdw: Record Started store_null at %d", p->cur_col);
+    elog(DEBUG4, "quasar_fdw: Record Started store_null at %lu", p->cur_col);
 
     if (p->level > COLUMN_LEVEL && is_json_type(p)) {
         jsonAppendCommaIf(p);
