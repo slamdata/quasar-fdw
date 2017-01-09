@@ -34,12 +34,13 @@ VERBOSE=0
 NO_FDW=
 USE_SOURCE=
 NO_QUASAR=1
+REQUIRE_SUDO=1
 
 ## Configuration
 POSTGRES_VERSION=${POSTGRES_VERSION:-9.4}
 
 ## User-customizable variables
-FDWVERSION=${FDWVERSION:-v1.4.0}
+FDWVERSION=${FDWVERSION:-v1.4.1}
 YAJLCLONEURL=${YAJLCLONEURL:-https://github.com/quasar-analytics/yajl}
 YAJLVERSION=${YAJLVERSION:-646b8b82ce5441db3d11b98a1049e1fcb50fe776}
 FDWCLONEURL=${FDWCLONEURL:-https://github.com/quasar-analytics/quasar-fdw}
@@ -59,6 +60,7 @@ function install()
     mypushd $DIR
     ensure_requirements
     test_current_postgres_install
+    update_installer
     if [[ "$TODO_PG_INSTALL" == "1" ]] || [[ "$TODO_PG_UPDATE" == "1" ]]; then
         install_postgres
     fi
@@ -101,8 +103,7 @@ function test_current_postgres_install()
 
 function can_use_binaries()
 {
-    PGVERSION=$(pg_config --version | cut -d' ' -f2)
-    TARBASE="quasar_fdw-${ARCH}-${PGVERSION}-${FDWVERSION}"
+    TARBASE="quasar_fdw-${ARCH}-${POSTGRES_VERSION}-${FDWVERSION}"
     TAR="${FDWCLONEURL}/releases/download/${FDWVERSION}/${TARBASE}.tar.gz"
     log "Querying for binaries: $TAR"
     if [[ -z $(curl $TAR -XHEAD --head 2>/dev/null | grep "302 Found") ]]; then
@@ -112,22 +113,22 @@ function can_use_binaries()
 
 function install_binaries()
 {
-    logx wget $TAR -O ${TARBASE}.tar.gz
-    logx tar xzvf ${TARBASE}.tar.gz
+    runx wget $TAR -O ${TARBASE}.tar.gz
+    runx tar xzvf ${TARBASE}.tar.gz
     mypushd ${TARBASE}
-    logx ./install.sh
+    runx ./install.sh
     mypopd
 }
 
 function install_fdw()
 {
     log "Installing Quasar FDW version $FDWVERSION"
-    (logx wget "$FDWCLONEURL/archive/$FDWVERSION.tar.gz" -O "quasar-fdw-$FDWVERSION.tar.gz") \
+    (runx wget "$FDWCLONEURL/archive/$FDWVERSION.tar.gz" -O "quasar-fdw-$FDWVERSION.tar.gz") \
         || error "Getting FDW repository failed"
-    (logx tar xzvf "quasar-fdw-$FDWVERSION.tar.gz") \
+    (runx tar xzvf "quasar-fdw-$FDWVERSION.tar.gz") \
         || error "Untaring FDW repository failed"
     mypushd "quasar-fdw-${FDWVERSION#v}"
-    (logx make install) \
+    (runx make install) \
         || error "Error installing Quasar FDW"
     mypopd
 }
@@ -135,14 +136,14 @@ function install_fdw()
 function install_yajl()
 {
     log "Installing yajl version $YAJLVERSION"
-    (logx wget "$YAJLCLONEURL/archive/$YAJLVERSION.tar.gz" -O "yajl-$YAJLVERSION.tar.gz") \
+    (runx wget "$YAJLCLONEURL/archive/$YAJLVERSION.tar.gz" -O "yajl-$YAJLVERSION.tar.gz") \
         || error "Getting YAJL repository failed"
-    (logx tar xzvf "yajl-$YAJLVERSION.tar.gz") \
+    (runx tar xzvf "yajl-$YAJLVERSION.tar.gz") \
         || error "Untaring YAJL repository failed"
     mypushd "yajl-$YAJLVERSION"
-    (logx ./configure) \
+    (runx ./configure) \
         || error "Configuration of YAJL failed"
-    (logx make clean install) \
+    (runx make clean install) \
         || error "Installation of YAJL failed"
     if [[ -z $LD_LIBRARY_PATH ]]; then
         mv /usr/local/lib/libyajl* /usr/lib/
@@ -166,8 +167,14 @@ function cleanup()
 
 function ensure_requirements()
 {
-    if [[ -z $(which sudo) ]]; then
-        error "sudo is required. apt-get install sudo."
+    if [[ $(whoami) == "root" ]]; then
+        REQUIRE_SUDO=
+    else
+        if [[ -z $(which sudo) ]]; then
+            error "root access is required. install as root or with sudo access."
+        elif [[ $(sudo ls >/dev/null 2>&1 || echo 'fail') == 'fail' ]]; then
+            error "root access is required. give sudo access"
+        fi
     fi
 
     case $OS in
@@ -191,18 +198,30 @@ function install_builddeps()
 {
     case $OS in
         osx)
-            if [[ -z $(which make) ]]; then logx brew install make; fi
-            if [[ -z $(which cmake) ]]; then logx brew install cmake; fi
+            if [[ -z $(which make) ]]; then runx brew install make; fi
+            if [[ -z $(which cmake) ]]; then runx brew install cmake; fi
             ;;
         debian)
-            (logx sudo apt-get install -y make cmake libcurl4-openssl-dev curl) \
+            (runx apt-get install -y make cmake libcurl4-openssl-dev curl) \
                 || error "Couldn't install build dependencies"
             ;;
         centos)
-            (logx sudo yum install -y make cmake libcurl-devel curl gcc) \
+            (runx yum install -y make cmake libcurl-devel curl gcc) \
                 || error "Couldn't install build dependencies"
             ;;
         *)
+            ;;
+    esac
+}
+
+function update_installer()
+{
+    case $OS in
+        debian)
+            runx apt-get update -q
+            ;;
+        centos)
+            runx $YUM update -q
             ;;
     esac
 }
@@ -212,60 +231,67 @@ function install_postgres()
     case $OS in
         osx)
             if [[ "$TODO_PG_UPDATE" == "1" ]]; then
-                (logx brew unlink postgresql) \
+                (runx brew unlink postgresql) \
                     || error "Couldn't unlink old postgres install"
             fi
-            (logx brew install postgresql) \
+            (runx brew install postgresql) \
                 || error "Couldn't install postgres package $OSX_POSTGRES_PACKAGE"
             ;;
         debian)
             if [[ "$TODO_PG_UPDATE" == "1" ]]; then
-                (logx sudo apt-get uninstall -y postgresql)
+                (runx apt-get uninstall -y postgresql)
             fi
 
-            (logx sudo apt-get install -y wget) \
+            (runx apt-get install -y wget) \
                 || error "Couldn't install wget"
 
-            sudo sh -c "echo \"deb http://apt.postgresql.org/pub/repos/apt/ ${OSVERSION}-pgdg main\" > /etc/apt/sources.list.d/pgdg.list"
-            (logx sudo wget --quiet https://www.postgresql.org/media/keys/ACCC4CF8.asc -O /tmp/ACCC4CF8.asc \
-                   && sudo apt-key add /tmp/ACCC4CF8.asc) \
-                  || error "Couldn't get postgresql repo signing key"
-            logx sudo apt-get update
+            cat | runx tee /etc/apt/sources.list.d/pgdg.list <<EOF
+deb http://apt.postgresql.org/pub/repos/apt/ $OSVERSION-pgdg main
+EOF
 
-            (logx sudo apt-get install -y postgresql-${POSTGRES_VERSION} \
+            (runx wget --quiet https://www.postgresql.org/media/keys/ACCC4CF8.asc -O /tmp/ACCC4CF8.asc \
+                   && runx apt-key add /tmp/ACCC4CF8.asc) \
+                  || error "Couldn't get postgresql repo signing key"
+            runx apt-get update
+
+            (runx apt-get install -y postgresql-${POSTGRES_VERSION} \
                                           postgresql-server-dev-${POSTGRES_VERSION}) \
                 || error "Couldn't install postgresql-${POSTGRES_VERSION}"
             ;;
         centos)
             case $OSTYPE in
                 fedora)
-                    logx sudo sed 's/\(\[fedora\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora.repo
-                    logx sudo sed 's/\(\[updates\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora-updates.repo
-                    logx sudo rpm -Uvh http://yum.postgresql.org/9.4/fedora/fedora-${OSVERSION}-x86_64/pgdg-fedora94-9.4-4.noarch.rpm
+                    runx sed 's/\(\[fedora\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora.repo
+                    runx sed 's/\(\[updates\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora-updates.repo
+                    runx rpm -Uvh http://yum.postgresql.org/9.4/fedora/fedora-${OSVERSION}-x86_64/pgdg-fedora94-9.4-4.noarch.rpm
                     ;;
                 centos)
-                    logx sudo sed 's/\(\[base\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/CentOS-Base.repo
-                    logx sudo sed 's/\(\[updates\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/CentOS-Base.repo
-                    logx sudo rpm -Uvh http://yum.postgresql.org/9.4/redhat/rhel-${OSVERSION}-x86_64/pgdg-centos94-9.4-2.noarch.rpm
+                    runx sed 's/\(\[base\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/CentOS-Base.repo
+                    runx sed 's/\(\[updates\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/CentOS-Base.repo
+                    runx rpm -Uvh http://yum.postgresql.org/9.4/redhat/rhel-${OSVERSION}-x86_64/pgdg-centos94-9.4-2.noarch.rpm
                     ;;
                 rhel)
-                    logx sudo sed 's/\(\[main\]\)/\1\nexclude=postgresql*/' -i /etc/yum/pluginconf.d/rhnplugin.conf
-                    logx sudo sed 's/\(\[main\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora-updates.repo
-                    logx sudo rpm -Uvh http://yum.postgresql.org/${POSTGRES_VERSION}/redhat/rhel-${OSVERSION}-x86_64/pgdg-redhat94-${POSTGRES_VERSION}-2.noarch.rpm
+                    runx sed 's/\(\[main\]\)/\1\nexclude=postgresql*/' -i /etc/yum/pluginconf.d/rhnplugin.conf
+                    runx sed 's/\(\[main\]\)/\1\nexclude=postgresql*/' -i /etc/yum.repos.d/fedora-updates.repo
+                    runx rpm -Uvh http://yum.postgresql.org/${POSTGRES_VERSION}/redhat/rhel-${OSVERSION}-x86_64/pgdg-redhat94-${POSTGRES_VERSION}-2.noarch.rpm
                     ;;
             esac
 
-            logx sudo $YUM install -y postgresql${POSTGRES_VERSION_NODOT} postgresql${POSTGRES_VERSION_NODOT}-server postgresql${POSTGRES_VERSION_NODOT}-libs
+            runx $YUM install -y postgresql${POSTGRES_VERSION_NODOT} postgresql${POSTGRES_VERSION_NODOT}-server postgresql${POSTGRES_VERSION_NODOT}-libs
             ;;
         *)
             ;;
     esac
+
+    if [[ -z $(which pg_config) ]]; then
+        error "postgres install failed"
+    fi
 }
 
 function install_quasar() {
     loc=/opt/quasar/$(basename ${QUASARJARURL})
-    sudo mkdir -p /opt/quasar
-    logx sudo wget ${QUASARJARURL} -O $loc
+    runx mkdir -p /opt/quasar
+    runx wget ${QUASARJARURL} -O $loc
     log "***"
     log "Quasar JAR has been downloaded to $loc"
     log "Run with \`java -jar $loc -c <config_file>\`"
@@ -385,14 +411,16 @@ function log()
 }
 
 # Execute a command and log output
-function logx()
+function runx()
 {
+    sudo=
+    if [[ ! -z $REQUIRE_SUDO ]]; then sudo=sudo; fi
     echo "cmd: $@" | tee -a $LOG
     if [[ "$VERBOSE" == "1" ]]; then
-        $@ 2>&1 | tee -a $LOG
+        $sudo $@ 2>&1 | tee -a $LOG
         return $?
     else
-        $@ >> $LOG 2>&1
+        $sudo $@ >> $LOG 2>&1
         return $?
     fi
 }
